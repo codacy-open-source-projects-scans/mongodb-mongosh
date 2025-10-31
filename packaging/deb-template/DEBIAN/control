@@ -1,0 +1,12 @@
+Package: {{debName}}
+Provides: {{provides}}
+Version: {{version}}
+Section: utils
+Priority: optional
+Architecture: {{debianArch}}
+Installed-Size: {{size}}
+Maintainer: {{maintainer}}
+Homepage: {{homepage}}
+Description: {{description}}
+Depends: {{debDepends}}
+Recommends: {{debRecommends}}

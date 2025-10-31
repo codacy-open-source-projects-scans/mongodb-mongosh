@@ -1,0 +1,45 @@
+{
+  "name": "@mongosh/java-shell",
+  "version": "2.4.10",
+  "private": true,
+  "description": "Java application that uses mongosh-shell-api node module and MongoDB java driver to run mongo shell on JVM",
+  "config": {
+    "unsafe-perm": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/mongodb-js/mongosh.git"
+  },
+  "scripts": {
+    "webpack-shell-api": "webpack --mode production",
+    "test": "mocha -r \"../../scripts/import-expansions.js\" --timeout 60000 --colors -r ts-node/register --reporter \"../../configs/mocha-config-mongosh/reporter.ts\" \"./src/test/js/run-tests.ts\"",
+    "test-ci": "node ../../scripts/run-if-package-requested.js npm run test",
+    "test-coverage": "nyc --no-clean --cwd ../.. --reporter=none npm run test",
+    "test-ci-coverage": "nyc --no-clean --cwd ../.. --reporter=none npm run test-ci"
+  },
+  "devDependencies": {
+    "@mongodb-js/tsconfig-mongosh": "^1.0.0",
+    "assert": "^1.5.0",
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.0",
+    "stream-http": "^3.2.0",
+    "https-browserify": "^1.0.0",
+    "os-browserify": "^0.3.0",
+    "path-browserify": "^1.0.1",
+    "stream-browserify": "^3.0.0",
+    "util": "^0.12.5",
+    "webpack-merge": "^5.8.0"
+  },
+  "license": "SSPL",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=14.15.1"
+  },
+  "mongosh": {
+    "variants": [
+      "linux"
+    ]
+  }
+}

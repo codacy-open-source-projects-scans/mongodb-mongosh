@@ -1,0 +1,2 @@
+{ "acknowledged": true, "insertedId": <ObjectID> }
+{ "timestamp": {"$date": {"$numberLong": "1662681600000"}} }

@@ -1,0 +1,12 @@
+{
+  "extends": "@mongodb-js/tsconfig-mongosh/tsconfig.common.json",
+  "compilerOptions": {
+    "outDir": "lib",
+    "jsx": "react",
+    "lib": ["dom"],
+    // react-ace types are incorrect: https://github.com/securingsincity/react-ace/issues/1547
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["./src/**/*.spec.*"]
+}

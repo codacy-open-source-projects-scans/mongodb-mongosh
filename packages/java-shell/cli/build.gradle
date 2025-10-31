@@ -1,0 +1,20 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.jetbrains.kotlin.jvm'
+}
+
+dependencies {
+    implementation rootProject
+    implementation group: 'org.graalvm.js', name: 'js', version: '22.3.1'
+    implementation group: 'org.mongodb', name: 'mongodb-driver-sync', version: '4.5.1'
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8"
+}
+
+repositories {
+    mavenCentral()
+}
+
+application {
+    mainClassName = "com.mongodb.mongosh.cli.MainKt"
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "@mongodb-js/tsconfig-mongosh/tsconfig.common.json",
+  "compilerOptions": {
+    "outDir": "./lib",
+    "allowJs": true,
+    "removeComments": false,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["./src/**/*.spec.*"]
+}

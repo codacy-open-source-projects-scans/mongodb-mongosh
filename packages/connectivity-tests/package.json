@@ -1,0 +1,20 @@
+{
+  "name": "@mongosh/connectivity-tests",
+  "version": "2.5.2",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "echo only run as part of test-connectivity",
+    "test-connectivity": "bash test/all.sh",
+    "test-ci": "node ../../scripts/run-if-package-requested.js npm test",
+    "test-coverage": "nyc --no-clean --cwd ../.. --reporter=none npm run test",
+    "test-ci-coverage": "nyc --no-clean --cwd ../.. --reporter=none npm run test-ci"
+  },
+  "devDependencies": {
+    "mongosh": "2.5.9"
+  },
+  "mongosh": {
+    "unitTestsOnly": true,
+    "variants": []
+  }
+}

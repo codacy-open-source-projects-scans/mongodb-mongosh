@@ -1,0 +1,3 @@
+{
+  "extends": "@mongodb-js/tsconfig-mongosh/tsconfig.common.json"
+}

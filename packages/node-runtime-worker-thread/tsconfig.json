@@ -1,0 +1,11 @@
+{
+  "extends": "@mongodb-js/tsconfig-mongosh/tsconfig.common.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "allowJs": true,
+    "lib": ["WebWorker"]
+  },
+  "files": ["./src/index.d.ts"],
+  "include": ["src/**/*"],
+  "exclude": ["./src/**/*.spec.*"]
+}

@@ -1,0 +1,1792 @@
+<%
+const { RELEASE_PACKAGE_MATRIX } = require('../config/release-package-matrix')
+const { NODE_JS_VERSION_20 } = require('./constants')
+
+const { UNIT_TESTS_BUILD_VARIANTS } = require('./build-variants/unit-tests-build-variants')
+const { E2E_TESTS_BUILD_VARIANTS } = require('./build-variants/e2e-tests-build-variants')
+const { COMPILE_BUILD_VARIANTS } = require('./build-variants/compile-build-variants')
+
+const { UNIT_TESTS, UNIT_TESTS_WITH_BUILD_VARIANTS } = require('./tasks/unit-tests')
+%>
+exec_timeout_secs: 10800
+
+pre:
+  - command: shell.exec
+    params:
+      shell: bash
+      script: |
+        rm -rf "$HOME/.mongodb/mongosh"
+post_error_fails_task: true
+post:
+  - command: shell.exec
+    params:
+      shell: bash
+      script: |
+        mkdir -p npm-logs
+        tar cvzf npm-logs.tgz npm-logs
+
+        if [ -d "src/tmp/mongodb-runner/logs" ]; then
+          tar cvzf mongodb-runner-logs.tgz -C src/tmp/mongodb-runner logs
+        else
+          echo "Directory src/tmp/logs does not exist. Skipping."
+        fi
+
+        if [ -d "$HOME/.mongodb/mongosh" ]; then
+          TARGET="$PWD/mongosh-logs.tgz"
+          (cd $HOME/.mongodb && tar cvzf "$TARGET" mongosh/*_log)
+        else
+          echo "Directory ~/.mongodb/mongosh does not exist. Skipping."
+        fi
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: npm-logs.tgz
+      remote_file: mongosh/binaries/${revision}/${revision_order_id}/npm-logs-${build_variant}-${task_name}-${task_id}.tgz
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: application/x-gzip
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: mongosh-logs.tgz
+      remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-logs-${build_variant}-${task_name}-${task_id}.tgz
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: application/x-gzip
+      optional: true
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: mongodb-runner-logs.tgz
+      remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongodb-runner-logs-${build_variant}-${task_name}-${task_id}.tgz
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: application/x-gzip
+      optional: true
+  - command: attach.xunit_results
+    params:
+      file: src/.logs/*.xml
+
+
+# Functions are any command that can be run.
+#
+# Current functions:
+#   checkout - Checks out the project from git.
+#   compile_ts - Installs Node and all dependencies, and run all prepublish scripts.
+#   install - Installs Node and all dependencies, and download the result of running all prepublish scripts.
+#   check - Performs linter and dependency checks.
+#   test - Runs all tests for a specific package.
+#   test_vscode - Clones the vscode extension repository and runs its tests.
+#   test_connectivity - Runs extra connectivity tests.
+#   test_apistrict - Runs shell API and CLI tests with --apiStrict --apiDeprecationErrors.
+#   compile_artifact - Compile the release binary.
+#   package_artifact - Upload the release binary together with other files to S3.
+#   sign_artifact - Get a package file from S3, sign it, put it back into S3.
+#   verify_artifact - Verify if the package was successfully signed using Garasign.
+#   test_linux_artifact - Test that the built artifact works where we expect it to.
+#                         We use this to verify that e.g. the Ubuntu-built release
+#                         binary also works on RHEL and Debian.
+#   generate_license_and_vulnerability_report - Generates a report of vulnerabilities affecting the bundled application.
+#   release_publish - Publishes the npm packages and uploads the tarballs.
+functions:
+  checkout:
+    - command: git.get_project
+      type: system
+      params:
+        directory: src
+
+  checkout_writeable:
+    - command: github.generate_token
+      params:
+        expansion_name: generated_github_token
+        owner: mongodb-js
+        repo: mongosh
+        permissions:
+          contents: write
+    - command: git.get_project
+      type: system
+      params:
+        directory: src
+        token: ${generated_github_token}
+
+  compile_ts:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DISTRO_ID: ${distro_id}
+          MONOGDB_DRIVER_VERSION_OVERRIDE: ${mongodb_driver_version_override}
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        script: |
+          set -e
+          set -x
+          .evergreen/install-node.sh
+          .evergreen/install-npm-deps.sh
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+        script: |
+          source .evergreen/setup-env.sh
+          npm run evergreen-release bump
+          npm run compile
+          tar cvzf compiled-ts.tgz packages/*/{lib,dist,package.json} package.json package-lock.json
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/compiled-ts.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/compiled-ts.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/x-gzip
+  install:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DISTRO_ID: ${distro_id}
+          MONOGDB_DRIVER_VERSION_OVERRIDE: ${mongodb_driver_version_override}
+          PUPPETEER_SKIP_DOWNLOAD: ${puppeteer_skip_download|true}
+        script: |
+          set -e
+          set -x
+          .evergreen/install-node.sh
+          .evergreen/install-npm-deps.sh
+    - command: s3.get
+      type: setup
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/compiled-ts.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/compiled-ts.tgz
+        bucket: mciuploads
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          tar xvzf compiled-ts.tgz
+  check:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run evergreen-release bump
+          npm run check-ci
+          }
+  test:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run test-ci
+          echo "Archiving current coverage result..."
+          tar cvzf nyc-output.tgz .nyc_output
+          }
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          MONGOSH_RUN_ONLY_IN_PACKAGE: ${mongosh_run_only_in_package}
+          AWS_AUTH_IAM_ACCESS_KEY_ID: ${devtools_ci_aws_key}
+          AWS_AUTH_IAM_SECRET_ACCESS_KEY: ${devtools_ci_aws_secret}
+          STREAMS_E2E_SPI_CONNECTION_STRING: ${streams_e2e_spi_connection_string}
+          STREAMS_E2E_DB_USER: ${streams_e2e_db_user}
+          STREAMS_E2E_DB_PASSWORD: ${streams_e2e_db_password}
+          STREAMS_E2E_CLUSTER_CONNECTION_STRING: ${streams_e2e_cluster_connection_string}
+          TASK_NAME: ${task_name}
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/nyc-output.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/nyc-output-${build_variant}-${mongosh_test_id}.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/x-gzip
+
+  check_coverage:
+    <% for (let [unitTest, variant] of UNIT_TESTS_WITH_BUILD_VARIANTS) {
+        let buildVariant = variant.name;
+         %>
+    - command: s3.get
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/nyc-output-<% out(buildVariant) %>-<% out(unitTest.id) %>.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/nyc-output-<% out(buildVariant) %>-<% out(unitTest.id) %>.tgz
+        bucket: mciuploads
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          tar xvzf nyc-output-<% out(buildVariant) %>-<% out(unitTest.id) %>.tgz
+    <% } %>
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          tar cvzf full-nyc-output.tgz .nyc_output
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/full-nyc-output.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/full-nyc-output.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/x-gzip
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run report-coverage-ci
+          echo "Creating coverage tarball..."
+          tar cvzf coverage.tgz coverage
+          }
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/coverage.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/coverage.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/x-gzip
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run check-coverage
+          }
+
+  test_vscode:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DOCKERHUB_USERNAME: ${dockerhub_username}
+          DOCKERHUB_PASSWORD: ${dockerhub_password}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          (cd scripts/docker && docker build -t ubuntu22.04-xvfb -f ubuntu22.04-xvfb.Dockerfile .)
+          docker run \
+            --rm -v $PWD:/tmp/build ubuntu22.04-xvfb \
+            -c 'cd /tmp/build && ./testing/test-vscode.sh'
+          }
+  test_connectivity:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          TEST_MONGOSH_EXECUTABLE: ${test_mongosh_executable|}
+          KERBEROS_JUMPHOST_DOCKERFILE: ${kerberos_jumphost_dockerfile|}
+          DOCKERHUB_USERNAME: ${dockerhub_username}
+          DOCKERHUB_PASSWORD: ${dockerhub_password}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run test-connectivity
+          }
+  test_apistrict:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+        script: |
+          set -e
+          {
+          source .evergreen/setup-env.sh
+          npm run test-apistrict-ci
+          }
+
+  ###
+  # ARTIFACT COMPILATION
+  #
+  # compile_artifact generates the executable binary and uploads it as TGZ to S3 for later use.
+  # Use download_compiled_artifact to download the TGZ from S3.
+  #
+  # Both functions expect the following arguments:
+  # - executable_os_id
+  ###
+  compile_artifact:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/compile-artifact.sh
+        env:
+          DISTRO_ID: ${distro_id}
+          NODE_JS_VERSION: ${node_js_version}
+          MONGOSH_SHARED_OPENSSL: ${mongosh_shared_openssl}
+          GITHUB_PR_NUMBER: ${github_pr_number}
+  upload_sbom:
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/dist/.sbom.json
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-${executable_os_id}${extra_upload_tag}-sbom.json
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/json
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/dist/.purls.txt
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-${executable_os_id}${extra_upload_tag}-purls.txt
+        bucket: mciuploads
+        permissions: public-read
+        content_type: text/plain
+  upload_compiled_artifact:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          DISTRO_ID: ${distro_id}
+        script: |
+          set -e
+          set -x
+          tar cvzf dist.tgz dist
+          bash .evergreen/compilation-context-expansions.sh
+    - command: expansions.update
+      params:
+        ignore_missing_file: false
+        file: tmp/compiling-context.yml
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/dist.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-${executable_os_id}${extra_upload_tag}.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/x-gzip
+  upload_first_party_deps_list:
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/.sbom/first-party-deps.json
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-${executable_os_id}${extra_upload_tag}-first-party-deps.json
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/json
+  download_compiled_artifact:
+    - command: s3.get
+      type: setup
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/dist.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-${executable_os_id}${extra_upload_tag}.tgz
+        bucket: mciuploads
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          tar xvzf dist.tgz
+
+  ###
+  # E2E TEST EXECUTION
+  #
+  # Runs the E2E tests against the compiled artifact, i.e. expects the compiled artifact to be already present.
+  ###
+  run_e2e_tests:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/run-e2e-tests.sh
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          AWS_AUTH_IAM_ACCESS_KEY_ID: ${devtools_ci_aws_key}
+          AWS_AUTH_IAM_SECRET_ACCESS_KEY: ${devtools_ci_aws_secret}
+          STREAMS_E2E_SPI_CONNECTION_STRING: ${streams_e2e_spi_connection_string}
+          STREAMS_E2E_DB_USER: ${streams_e2e_db_user}
+          STREAMS_E2E_DB_PASSWORD: ${streams_e2e_db_password}
+          STREAMS_E2E_CLUSTER_CONNECTION_STRING: ${streams_e2e_cluster_connection_string}
+          TASK_NAME: ${task_name}
+
+  ###
+  # PACKAGING AND UPLOADING
+  #
+  # package_artifact generates a distributable package out of the compiled artifact,
+  # i.e. it expects it to have been downloaded already. The distributable package will be uploaded
+  # to a specifc Evergreen S3 bucket for later use.
+  # sign_artifact signs and/or notarizes the distributable package as appropriate.
+  #
+  # The URL to download the distributable package can be retrieved by get_artifact_url.
+  #
+  # package_artifact expects the following arguments:
+  # - distro_id
+  # - package_variant
+  # - executable_os_id
+  #
+  # get_artifact_url and put_artifact_url expects the following arguments:
+  # - package_variant
+  # - signature_tag (either 'signed' or 'unsigned')
+  ###
+  add_crypt_shared_and_sbom:
+    - command: ec2.assume_role
+      display_name: Assume IAM role with permissions to pull Kondukto API token
+      params:
+        role_arn: ${kondukto_role_arn}
+    - command: shell.exec
+      display_name: Pull Kondukto API token from AWS Secrets Manager and write it to file
+      params:
+        silent: true
+        shell: bash
+        working_dir: src
+        include_expansions_in_env: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN]
+        script: |
+          set -e
+          # use AWS CLI to get the Kondukto API token from AWS Secrets Manager
+          kondukto_token=$(aws secretsmanager get-secret-value --secret-id "kondukto-token" --region "us-east-1" --query 'SecretString' --output text)
+          # set the KONDUKTO_TOKEN environment variable
+          echo "KONDUKTO_TOKEN=$kondukto_token" > /tmp/kondukto_credentials.env
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/download-crypt-shared-and-generate-sbom.sh
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DISTRO_ID_OVERRIDE: ${distro_id}
+          PACKAGE_VARIANT: ${package_variant}
+          ARTIFACTORY_USERNAME: ${artifactory_username}
+          ARTIFACTORY_PASSWORD: ${artifactory_password}
+          # for Kondukto SBOM integration
+          KONDUKTO_BRANCH: ${branch_name}_${executable_os_id}
+  create_static_analysis_report:
+  <%
+  let firstPartyDepsFilenames = [];
+  for (const { executableOsId, packages } of RELEASE_PACKAGE_MATRIX) {
+        const filename = `mongosh-${executableOsId}-first-party-deps.json`;
+        firstPartyDepsFilenames.push(filename); %>
+    - command: s3.get
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/.sbom/<% out(filename) %>
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/<% out(filename) %>
+        bucket: mciuploads
+  <% } %>
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          export NODE_JS_VERSION=${node_js_version}
+          source .evergreen/setup-env.sh
+          .evergreen/create-static-analysis-report.sh
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          FIRST_PARTY_DEPENDENCY_FILENAMES: <% out(firstPartyDepsFilenames.map(f => `.sbom/${f}`).join(',')) %>
+          GITHUB_TOKEN: ${github_token}
+          GITHUB_PR_NUMBER: ${github_pr_number}
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/static-analysis-report.tgz
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/mongosh-static-analysis-report.tgz
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        content_type: application/x-gzip
+  package_artifact:
+    - command: expansions.write
+      type: setup
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/package-and-upload-artifact.sh
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DISTRO_ID_OVERRIDE: ${distro_id}
+          PACKAGE_VARIANT: ${package_variant}
+          ARTIFACT_URL_EXTRA_TAG: unsigned
+          DOCKERHUB_USERNAME: ${dockerhub_username}
+          DOCKERHUB_PASSWORD: ${dockerhub_password}
+  sign_artifact:
+    - command: expansions.write
+      type: setup
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/sign-packaged-artifact.sh
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DISTRO_ID_OVERRIDE: ${distro_id}
+          PACKAGE_VARIANT: ${package_variant}
+          MACOS_NOTARY_KEY: ${macos_notary_key}
+          MACOS_NOTARY_SECRET: ${macos_notary_secret}
+          REQUESTER: ${requester}
+  verify_artifact:
+    - command: expansions.write
+      type: setup
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          .evergreen/verify-packaged-artifact.sh
+  put_artifact_url:
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: artifact-url.txt
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/artifact-url-${package_variant}-${signature_tag}.txt
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/x-gzip
+  get_artifact_url:
+    - command: s3.get
+      type: setup
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: artifact-url.txt
+        remote_file: mongosh/binaries/${revision}/${revision_order_id}/artifact-url-${package_variant}-${signature_tag}.txt
+        bucket: mciuploads
+
+  write_preload_script:
+    - command: shell.exec
+      # silent: true
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          connectivity_test_atlas_username: ${connectivity_test_atlas_username}
+          connectivity_test_atlas_password: ${connectivity_test_atlas_password}
+          connectivity_test_atlas_hostname: ${connectivity_test_atlas_hostname}
+        script: |
+          set -e
+          .evergreen/create-preload-script.sh
+  spawn_host:
+    - command: host.create
+      type: setup
+      params:
+        provider: ec2
+        distro: ${distro}
+        security_group_ids:
+          - sg-097bff6dd0d1d31d0 # Magic string that's needed for SSH'ing.
+    - command: host.list
+      type: setup
+      params:
+        num_hosts: 1
+        path: buildhosts.yml # Write the host information to disk.
+        timeout_seconds: 1200
+        wait: true
+  run_pkg_tests_through_ssh:
+    - command: shell.exec
+      # silent: true
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          __project_aws_ssh_key_value: ${__project_aws_ssh_key_value}
+        script: |
+          set -e
+          .evergreen/setup-ssh-key.sh
+    - command: subprocess.exec
+      params:
+        working_dir: src
+        binary: bash .evergreen/run-on-ssh-host.sh
+        env:
+          ADMIN_USER_NAME: ${admin_user_name}
+          ONHOST_SCRIPT_PATH: ${onhost_script_path}
+          PRELOAD_SCRIPT_PATH: ${preload_script_path}
+  test_artifact_docker:
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DOCKERHUB_USERNAME: ${dockerhub_username}
+          DOCKERHUB_PASSWORD: ${dockerhub_password}
+        script: |
+          set -e
+          set -x
+          {
+          . .evergreen/setup-env.sh
+          . preload.sh
+          ./scripts/docker/build.sh ${dockerfile}
+          }
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          DOCKERHUB_USERNAME: ${dockerhub_username}
+          DOCKERHUB_PASSWORD: ${dockerhub_password}
+        script: |
+          set -e
+          set -x
+          {
+          . .evergreen/setup-env.sh
+          . preload.sh
+          ./scripts/docker/run.sh ${dockerfile} --smokeTests
+          }
+  test_artifact_macos:
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          {
+          . preload.sh
+          curl -sSfL "$ARTIFACT_URL" > mongosh.zip
+          unzip mongosh.zip
+          }
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          MONGOSH_NO_AUTOMATIC_ENCRYPTION_SUPPORT: ${no_automatic_encryption_support|}
+        script: |
+          set -e
+          set -x
+          {
+          system_profiler SPSoftwareDataType # for debugging
+          . preload.sh
+          ./mongosh-*/bin/mongosh --smokeTests
+          }
+  test_artifact_rpmextract:
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          {
+          . preload.sh
+          curl -sSfL "$ARTIFACT_URL" > mongosh.rpm
+          rpm2cpio mongosh.rpm | cpio -idmv
+          }
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          MONGOSH_NO_AUTOMATIC_ENCRYPTION_SUPPORT: ${no_automatic_encryption_support|}
+        script: |
+          set -e
+          set -x
+          {
+          . preload.sh
+          ./usr/bin/mongosh --smokeTests
+          }
+  test_artifact_debextract:
+    - command: shell.exec
+      type: setup
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          {
+          . preload.sh
+          curl -sSfL "$ARTIFACT_URL" > mongosh.deb
+          dpkg -x mongosh.deb .
+          }
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          MONGOSH_NO_AUTOMATIC_ENCRYPTION_SUPPORT: ${no_automatic_encryption_support|}
+        script: |
+          set -e
+          set -x
+          {
+          . preload.sh
+          ./usr/bin/mongosh --smokeTests
+          }
+
+  generate_license_and_vulnerability_report:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          NODE_JS_VERSION: ${node_js_version}
+          EVERGREEN_IS_PATCH: ${is_patch}
+          SNYK_TOKEN: ${snyk_token}
+          EVERGREEN_TASK_URL: https://evergreen.mongodb.com/task/${task_id}
+          JIRA_API_TOKEN: ${jira_api_token}
+        script: |
+          set -e
+          source .evergreen/setup-env.sh
+
+          # validate licenses, we first remove THIRD_PARTY_NOTICES.md, so we are sure
+          # that we would only upload the newly generated file in case of success.
+          rm THIRD_PARTY_NOTICES.md
+          npm run update-third-party-notices
+
+          # generate vulnerability report
+          set +e
+          npm run generate-vulnerability-report
+          return_code=$?
+          set -e
+
+          # if on main and not triggered by a tag, also create a ticket for each vulnerability found
+          if [[ "${requester}" == "commit" ]]; then
+            export JIRA_BASE_URL="https://jira.mongodb.org"
+            export JIRA_PROJECT="MONGOSH"
+            export JIRA_VULNERABILITY_BUILD_INFO="- [Evergreen task|$EVERGREEN_TASK_URL]"
+            npm run create-vulnerability-tickets
+          else
+            cat .sbom/vulnerability-report.md
+          fi
+
+          if [[ "${is_patch}" != "true" ]]; then
+            # Run `snyk monitor` to keep `main` tracked
+            npx snyk monitor --org=dcd6db53-1532-4e65-beca-55db83f2cd52 --file=package-lock.json
+            # Fails if the report failed and is not a patch, including during releases:
+            exit $return_code
+          fi
+
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        local_file: src/.sbom/dependencies.json
+        remote_file: ${project}/${revision}_${revision_order_id}/dependencies.json
+        content_type: application/json
+        optional: true
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        local_file: src/.sbom/snyk-test-result.json
+        remote_file: ${project}/${revision}_${revision_order_id}/snyk-test-result.json
+        content_type: application/json
+        optional: true
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        local_file: src/.sbom/snyk-test-result.html
+        remote_file: ${project}/${revision}_${revision_order_id}/snyk-test-result.html
+        content_type: text/html
+        optional: true
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        local_file: src/.sbom/vulnerability-report.md
+        remote_file: ${project}/${revision}_${revision_order_id}/vulnerability-report.md
+        content_type: text/markdown
+        optional: true
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        permissions: private
+        visibility: signed
+        local_file: src/THIRD_PARTY_NOTICES.md
+        remote_file: ${project}/${revision}_${revision_order_id}/THIRD_PARTY_NOTICES.md
+        content_type: text/markdown
+        optional: true
+
+  papertrail_trace:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          ls -lh dist/
+          if [ x"${triggered_by_git_tag}" == x"" ]; then
+            tag=$(git describe --tags --always --dirty)
+          else
+            tag="${triggered_by_git_tag}"
+          fi
+          echo "Setting version for papertrail to $tag, with product ${product}"
+          version="$(echo $tag | sed -e 's/^[vr]//')"
+          cat <<EOT > trace-expansions.yml
+          release_version: "$version"
+          EOT
+          cat trace-expansions.yml
+    - command: expansions.update
+      params:
+        file: src/trace-expansions.yml
+    - command: papertrail.trace
+      params:
+        key_id: ${papertrail_key_id}
+        secret_key: ${papertrail_secret_key}
+        product: ${product}
+        version: ${release_version}
+        filenames:
+          - "src/dist/*"
+
+  release_draft:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: ec2.assume_role
+      params:
+        role_arn: "arn:aws:iam::119629040606:role/s3-access.cdn-origin-compass"
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          DOWNLOAD_CENTER_AWS_KEY_ARTIFACTS: ${AWS_ACCESS_KEY_ID}
+          DOWNLOAD_CENTER_AWS_SECRET_ARTIFACTS: ${AWS_SECRET_ACCESS_KEY}
+          DOWNLOAD_CENTER_AWS_SESSION_TOKEN_ARTIFACTS: ${AWS_SESSION_TOKEN}
+        script: |
+          set -e
+          {
+          export NODE_JS_VERSION=${node_js_version}
+          source .evergreen/setup-env.sh
+          npm run evergreen-release draft
+          git add .
+          git commit --no-allow-empty -m "chore(release): bump to prepare for mongosh release"
+          }
+
+  release_publish_download_and_list_artifacts:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          node_js_version: ${node_js_version}
+        script: |
+          set -e
+          .evergreen/run-evergreen-release.sh download-and-list-artifacts
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          ls -lh dist/
+          cat -n dist/SHASUMS1.txt
+          cat -n dist/SHASUMS256.txt
+
+  release_publish_dry_run:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: ec2.assume_role
+      params:
+        role_arn: "arn:aws:iam::119629040606:role/s3-access.cdn-origin-compass"
+    - command: shell.exec
+      # silent: true
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          devtoolsbot_npm_token: ${devtoolsbot_npm_token}
+          node_js_version: ${node_js_version}
+          DOWNLOAD_CENTER_AWS_KEY_ARTIFACTS: ${AWS_ACCESS_KEY_ID}
+          DOWNLOAD_CENTER_AWS_SECRET_ARTIFACTS: ${AWS_SECRET_ACCESS_KEY}
+          DOWNLOAD_CENTER_AWS_SESSION_TOKEN_ARTIFACTS: ${AWS_SESSION_TOKEN}
+        script: |
+          set -e
+          .evergreen/run-evergreen-release.sh publish -- --dry-run
+
+  release_publish:
+    - command: expansions.write
+      type: system
+      params:
+        file: tmp/expansions.yaml
+        redacted: true
+    - command: ec2.assume_role
+      params:
+        role_arn: "arn:aws:iam::119629040606:role/s3-access.cdn-origin-compass"
+    - command: shell.exec
+      # silent: true
+      params:
+        working_dir: src
+        shell: bash
+        env:
+          devtoolsbot_npm_token: ${devtoolsbot_npm_token}
+          node_js_version: ${node_js_version}
+          DOWNLOAD_CENTER_AWS_KEY_ARTIFACTS: ${AWS_ACCESS_KEY_ID}
+          DOWNLOAD_CENTER_AWS_SECRET_ARTIFACTS: ${AWS_SECRET_ACCESS_KEY}
+          DOWNLOAD_CENTER_AWS_SESSION_TOKEN_ARTIFACTS: ${AWS_SESSION_TOKEN}
+        script: |
+          set -e
+          .evergreen/run-evergreen-release.sh publish
+
+  run_perf_tests:
+    - command: shell.exec
+      params:
+        working_dir: src
+        shell: bash
+        script: |
+          set -e
+          set -x
+          npx -y mongodb-runner exec -t standalone --version=7.0.x-enterprise -- \
+            sh -c 'MONGOSH_SMOKE_TEST_SERVER="$MONGODB_URI" ./dist/mongosh --perfTests > perf_results.json'
+        env:
+          DISTRO_ID: ${distro_id}
+    - command: shell.exec
+      params:
+        script: |
+          # We use the requester expansion to determine whether the data is from a mainline evergreen run or not
+          if [ "${requester}" == "commit" ]; then
+            is_mainline=true
+          else
+            is_mainline=false
+          fi
+
+          # Parse the username out of the order_id. Patches append the username. The Signal Processing Service (SPS) endpoint does not need the other information.
+          parsed_order_id=$(echo "${revision_order_id}" | awk -F'_' '{print $NF}')
+
+          # Submit the performance data to the SPS endpoint
+          response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X 'POST' \
+            "https://performance-monitoring-api.corp.mongodb.com/raw_perf_results/cedar_report?project=${project_id}&version=${version_id}&variant=${build_variant}&order=$parsed_order_id&task_name=${task_name}&task_id=${task_id}&execution=${execution}&mainline=$is_mainline" \
+            -H 'accept: application/json' \
+            -H 'Content-Type: application/json' \
+            -d @src/perf_results.json)
+
+          http_status=$(echo "$response" | grep "HTTP_STATUS" | awk -F':' '{print $2}')
+          response_body=$(echo "$response" | sed '/HTTP_STATUS/d')
+
+          # We want to throw an error if the data was not successfully submitted
+          if [ "$http_status" -ne 200 ]; then
+            echo "Error: Received HTTP status $http_status"
+            echo "Response Body: $response_body"
+            exit 1
+          fi
+
+          echo "Response Body: $response_body"
+          echo "HTTP Status: $http_status"
+          
+# Tasks will show up as the individual blocks in the Evergreen UI that can
+# pass or fail.
+#
+# Current tasks:
+#   compile_ts - Do the initial compilation of TS sources.
+#   check - Performs linter and dependency checks.
+#   check_coverage - Performs coverage check by merging all NYC outputs first
+#   test_{version} - Runs all tests, against a specified mongod version.
+#   test_vscode - Run the vscode extension integration tests.
+#   test_connectivity - Runs extra connectivity tests.
+#   test_apistrict - Runs shell API and CLI tests with --apiStrict --apiDeprecationErrors.
+#   compile_artifact - Compile the release binary.
+#   package_artifact - Upload the release binary together with other files to S3.
+#   sign_artifact - Get a package file from S3, sign it, put it back into S3.
+#   test_linux_artifact - Test that the built artifact works where we expect it to.
+#   release_publish - Publishes the npm packages and uploads the tarballs.
+#   generate_license_and_vulnerability_report - Generates a report of vulnerabilities affecting the bundled application.
+#   pkg_test_* - Run tests on the release packages
+tasks:
+  - name: compile_ts
+    commands:
+      - func: checkout
+      - func: compile_ts
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  - name: check
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: check
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  - name: check_coverage
+    depends_on:
+      <% for (let [unitTest, variant] of UNIT_TESTS_WITH_BUILD_VARIANTS) {
+      %>
+      - name: test_<% out(unitTest.id) %>
+        variant: <% out(variant.name) %>
+      <% } %>
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: check_coverage
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  ###
+  # UNIT TESTS
+  # E.g. test_m60xc_n20 stands for mongod 6.0.x, community edition, Node.js 20
+  ###
+  <% for (const { id, packageName, usePuppeteer } of UNIT_TESTS) { %>
+  - name: test_<% out(id) %>
+    tags: ["assigned_to_jira_team_mongosh_mongosh","unit-test"]
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: ${node_js_version}
+      - func: test
+        vars:
+          mongosh_server_test_version: ${mongosh_server_test_version}
+          node_js_version: ${node_js_version}
+          mongosh_skip_node_version_check: ${mongosh_skip_node_version_check}
+          mongosh_test_id: "<% out(id) %>"
+          mongosh_run_only_in_package: "<% out(packageName) %>"
+          task_name: ${task_name}
+          puppeteer_skip_download: "<% out(usePuppeteer ? "false" : "true") %>"
+  <% } %>
+
+  ###
+  # INTEGRATION TESTS
+  ###
+  - name: test_vscode
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: test_vscode
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          task_name: ${task_name}
+  - name: test_connectivity
+    tags: ["extra-integration-test", "assigned_to_jira_team_mongosh_mongosh"]
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: test_connectivity
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          task_name: ${task_name}
+  - name: test_apistrict
+    tags: ["extra-integration-test", "assigned_to_jira_team_mongosh_mongosh"]
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: test_apistrict
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          mongosh_server_test_version: "latest-alpha-enterprise"
+          mongosh_test_force_api_strict: "1"
+          task_name: ${task_name}
+  - name: compile_artifact
+    tags: ["compile-artifact"]
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: compile_artifact
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: upload_compiled_artifact
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: upload_first_party_deps_list
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  - name: generate_license_and_vulnerability_report
+    tags: ["extra-integration-test"]
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: generate_license_and_vulnerability_report
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  ###
+  # E2E TESTS
+  ###
+  # Tests reuse the same compilation build variant, so we create those variations based on this.
+  <% for (const compileBuildVariant of COMPILE_BUILD_VARIANTS) {
+    const platformName = compileBuildVariant.name.replace('build_', '');
+    const executableOsId = platformName == 'darwin' ? 'darwin-x64' : platformName.replaceAll('_', '-');
+    %>
+  - name: e2e_tests_<% out(platformName) %>
+    tags: ["e2e-test", "assigned_to_jira_team_mongosh_mongosh"]
+    depends_on:
+      - name: compile_artifact
+        variant: <% out(compileBuildVariant.name) %>
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: ${node_js_version}
+      - func: download_compiled_artifact
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+      - func: run_e2e_tests
+        vars:
+          node_js_version: ${node_js_version}
+          mongosh_server_test_version: ${mongosh_server_test_version}
+          mongosh_test_e2e_force_fips: ${mongosh_test_e2e_force_fips}
+  <% } %>
+  - name: perf_tests_linux_x64
+    tags: ["perf-test"]
+    depends_on:
+      - name: compile_artifact
+        variant: build_linux_x64
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: download_compiled_artifact
+        vars:
+          executable_os_id: "linux-x64"
+      - func: run_perf_tests
+
+  ###
+  # EXECUTABLE CONNECTIVITY TESTS
+  ###
+  <% const executableConnectivityTests = [];
+  for (const { executableOsId, compileBuildVariant, kerberosConnectivityTestDockerfiles = [] } of RELEASE_PACKAGE_MATRIX) {
+    for (const dockerFile of kerberosConnectivityTestDockerfiles) {
+      const taskName = `executable_connectivity_test_${executableOsId.replace(/-/g, '_')}_${dockerFile.replace(/-/g, '_')}`;
+      executableConnectivityTests.push({ executableOsId, taskName });
+    %>
+  - name: <% out(taskName) %>
+    tags: ["connectivity-test"]
+    depends_on:
+      - name: compile_artifact
+        variant: <% out(compileBuildVariant) %>
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: download_compiled_artifact
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+      - func: test_connectivity
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          test_mongosh_executable: dist/mongosh
+          kerberos_jumphost_dockerfile: "Dockerfile.<% out(dockerFile) %>"
+          task_name: ${task_name}
+  <% } } %>
+
+  ###
+  # PACKAGING
+  ###
+  <% for (const { executableOsId, compileBuildVariant, packages } of RELEASE_PACKAGE_MATRIX) {
+       for (const { name: packageVariant } of packages) { %>
+  - name: add_crypt_shared_and_sbom_<% out(packageVariant.replace(/-/g, '_')) %>
+    tags: ["add-sbom-task"]
+    depends_on:
+      - name: compile_artifact
+        variant: <% out(compileBuildVariant) %>
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: download_compiled_artifact
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+      - func: add_crypt_shared_and_sbom
+        vars:
+          package_variant: <% out(packageVariant) %>
+          executable_os_id: <% out(executableOsId) %>
+      - func: upload_sbom
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+          extra_upload_tag: -<% out(packageVariant) %>-sbom
+      - func: upload_compiled_artifact
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+          extra_upload_tag: -<% out(packageVariant) %>-complete
+  - name: package_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+    depends_on:
+      - name: add_crypt_shared_and_sbom_<% out(packageVariant.replace(/-/g, '_')) %>
+        variant: linux_package
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: download_compiled_artifact
+        vars:
+          executable_os_id: <% out(executableOsId) %>
+          extra_upload_tag: -<% out(packageVariant) %>-complete
+      - func: package_artifact
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          package_variant: <% out(packageVariant) %>
+          executable_os_id: <% out(executableOsId) %>
+      - func: put_artifact_url
+        vars:
+          package_variant: <% out(packageVariant) %>
+          signature_tag: unsigned
+  - name: sign_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+    depends_on:
+      - name: package_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+        variant: "*"
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: get_artifact_url
+        vars:
+          package_variant: <% out(packageVariant) %>
+          signature_tag: unsigned
+      - func: sign_artifact
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          package_variant: <% out(packageVariant) %>
+      - func: papertrail_trace
+        vars:
+          product: "mongosh-dev"
+      - func: put_artifact_url
+        vars:
+          package_variant: <% out(packageVariant) %>
+          signature_tag: signed
+  - name: verify_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+    tags: ["smoke-test"]
+    depends_on:
+      - name: sign_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+        variant: "*"
+    commands:
+      - func: checkout
+      - func: get_artifact_url
+        vars:
+          package_variant: <% out(packageVariant) %>
+          signature_tag: signed
+      - func: verify_artifact
+  <% } } %>
+
+  ###
+  # SMOKE TESTS
+  ###
+  <%
+  const packageSmokeTestTasks = [];
+  for (const { packages, executableOsId } of RELEASE_PACKAGE_MATRIX) {
+       for (const { name, packageOn, smokeTestKind, smokeTestDockerfiles } of packages) if (smokeTestKind !== 'none') {
+        for (const dockerfile of smokeTestDockerfiles || ['']) {
+          const taskName = `pkg_test_${smokeTestKind}_${name}${dockerfile ? `_${dockerfile}` : ''}`.replace(/[-.]/g, '_');
+          packageSmokeTestTasks.push({taskName, executableOsId}); %>
+  - name: <% out(taskName) %>
+    tags: ["smoke-test"]
+    depends_on:
+      - name: sign_artifact_<% out(name.replace(/-/g, '_')) %>
+        variant: "*"
+    commands:
+      - func: checkout
+      - func: get_artifact_url
+        vars:
+          package_variant: <% out(name) %>
+          signature_tag: signed
+      - func: write_preload_script
+    <% switch (smokeTestKind) {
+      case 'ssh': { %>
+      - func: spawn_host
+        vars:
+          distro: windows-vsCurrent-small
+      - func: run_pkg_tests_through_ssh
+        vars:
+          admin_user_name: Administrator
+          onhost_script_path: .evergreen/test-package-win32.sh
+          preload_script_path: preload.sh
+    <% }; break;
+       case 'docker': { %>
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: test_artifact_docker
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+          dockerfile: <% out(dockerfile) %>
+          task_name: ${task_name}
+    <% }; break;
+    // We don't have docker for platforms other than x64, so for those we just
+    // extract the archives locally.
+       case 'macos':
+       case 'rpmextract':
+       case 'debextract': { %>
+      - func: test_artifact_<% out(smokeTestKind) %>
+    <% }; break;
+      default:
+        throw new Error(`pkg ${name} is missing a valid smoke test indicator`);
+    } %>
+  <% } } } %>
+  - name: create_static_analysis_report
+    tags: ["extra-integration-test"]
+    depends_on:
+      - name: ".compile-artifact"
+        variant: "*"
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: create_static_analysis_report
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+  ###
+  # RELEASE TASKS
+  ###
+  - name: release_draft
+    git_tag_only: true
+    depends_on:
+      - name: ".smoke-test"
+        variant: "*"
+      - name: ".extra-integration-test"
+        variant: "*"
+      - name: ".e2e-test"
+        variant: "*"
+      - name: ".connectivity-test"
+        variant: "*"
+      - name: check
+        variant: "*"
+      - name: ".unit-test"
+        variant: "*"
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: release_draft
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+  - name: release_publish_dry_run
+    git_tag_only: true
+    exec_timeout_secs: 86400
+    depends_on:
+      - name: release_draft
+    commands:
+      - func: checkout
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: release_publish_download_and_list_artifacts
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: papertrail_trace
+        vars:
+          product: "mongosh-draft"
+      - func: release_publish_dry_run
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+  - name: release_publish
+    tags: ["publish"]
+    git_tag_only: true
+    exec_timeout_secs: 86400
+    depends_on:
+      - name: compile_ts
+        variant: linux_compile
+    commands:
+      - func: checkout_writeable
+      - func: install
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: release_publish_download_and_list_artifacts
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      - func: papertrail_trace
+        vars:
+          product: "mongosh"
+      - func: release_publish
+        vars:
+          node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+
+# Need to run builds for every possible build variant.
+buildvariants:
+  <% for (const variant of UNIT_TESTS_BUILD_VARIANTS) { %>
+  - name: <% out(variant.name) %>
+    display_name: "<% out(variant.displayName) %>"
+    run_on: <% out(variant.runOn) %>
+    tags: <% out(variant.tags) %>
+    expansions:
+      executable_os_id: <% out(variant.executableOsId) %>
+      mongosh_server_test_version: "<% out(variant.mVersion || '') %>"
+      node_js_version: "<% out(variant.nVersion) %>"
+      mongosh_skip_node_version_check: "<% out(variant.skipNodeVersionCheck) %>"
+    tasks:
+     <% for (const test of UNIT_TESTS.filter(test => test.variants.includes(variant.platform))) { %>
+      - name: test_<% out(test.id) %>
+      <% } %>
+  <% } %>
+  <% for (const variant of COMPILE_BUILD_VARIANTS) { %>
+  - name: <% out(variant.name) %>
+    display_name: "<% out(variant.displayName) %>"
+    run_on: <% out(variant.runOn) %>
+    expansions:
+      executable_os_id: "<% out(variant.executableOsId) %>"
+      node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      <% if (variant.sharedOpenSsl) { %>
+      mongosh_shared_openssl: "<% out(variant.sharedOpenSsl) %>"
+      <% } %>
+    tasks:
+      - name: compile_artifact
+  <% } %>
+  <% for (const variant of E2E_TESTS_BUILD_VARIANTS) { %>
+  - name: <% out(variant.name) %>
+    display_name: "<% out(variant.displayName) %>"
+    run_on: <% out(variant.runOn) %>
+    tags: <% out([...(variant.tags ?? [])]) %>
+    expansions:
+      executable_os_id: "<% out(variant.executableOsId) %>"
+      node_js_version: "<% out(NODE_JS_VERSION_20) %>"
+      mongosh_server_test_version: "<% out(variant.mVersion) %>-enterprise"
+      mongosh_test_e2e_force_fips: "<% out(variant.fips ? '1' : '') %>"
+    tasks:
+      <%
+      let tasks = [`e2e_tests_${variant.compileBuildVariant.replace('build_', '')}`, ...(variant.additionalTasks ?? [])];
+      for (const task of tasks) { %>
+      - name: <% out(task) %>
+      <% } %>
+  <% } %>
+
+  - name: linux_compile
+    display_name: "Ubuntu 20.04 x64 (Compile and Check)"
+    run_on: ubuntu2004-small
+    tags: ["nightly-driver"]
+    tasks:
+      - name: compile_ts
+      - name: check
+  - name: linux_other
+    display_name: "Ubuntu 20.04 x64 (Other Tests)"
+    run_on: ubuntu2004-small
+    tags: ["nightly-driver"]
+    tasks:
+      - name: test_vscode
+      - name: test_connectivity
+      - name: test_apistrict
+  - name: linux_coverage
+    display_name: "Ubuntu 20.04 x64 (Coverage and Static Analysis Check)"
+    run_on: ubuntu2004-small
+    tasks:
+      - name: check_coverage
+      - name: create_static_analysis_report
+  - name: linux_package
+    display_name: "Ubuntu 20.04 x64 (Packaging)"
+    run_on: ubuntu2004-small
+    tags: ["nightly-driver"]
+    tasks:
+      <% for (const { executableOsId, packages } of RELEASE_PACKAGE_MATRIX) {
+          for (const { name: packageVariant } of packages) { %>
+      - name: add_crypt_shared_and_sbom_<% out(packageVariant.replace(/-/g, '_')) %>
+      <%
+            if (executableOsId.startsWith('linux')) { %>
+      - name: package_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+      - name: sign_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+      <% if (packageVariant.startsWith('deb')) { %>
+      - name: verify_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+      <% } %>
+      <% } } } %>
+      - name: sign_artifact_win32_x64
+      - name: sign_artifact_win32msi_x64
+  - name: verify_rhel_artifact
+    display_name: "RHEL (Signature Verification)"
+    run_on: rhel80-small
+    tasks:
+      <% for (const { packages } of RELEASE_PACKAGE_MATRIX) {
+          for (const { name: packageVariant } of packages) {
+            if (packageVariant.startsWith('rpm')) { %>
+      - name: verify_artifact_<% out(packageVariant.replace(/-/g, '_')) %>
+      <% } } } %>
+  - name: verify_windows_artifact
+    display_name: "Windows (Signature Verification)"
+    run_on: windows-vsCurrent-small
+    tasks:
+      - name: verify_artifact_win32_x64
+      - name: verify_artifact_win32msi_x64
+  - name: verify_mac_artifact
+    display_name: "MacOS (Signature Verification)"
+    run_on: macos-14-arm64
+    tasks:
+      - name: verify_artifact_darwin_arm64
+      - name: verify_artifact_darwin_x64
+
+  - name: pkg_smoke_tests_docker_x64
+    display_name: "package smoke (x64 Docker)"
+    run_on: ubuntu2004-small
+    tags: ["nightly-driver"]
+    tasks:
+  <% for (const { taskName, executableOsId } of packageSmokeTestTasks) {
+      if (executableOsId.includes('linux-x64')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: pkg_smoke_tests_docker_arm64
+    display_name: "package smoke (arm64 Docker)"
+    run_on: ubuntu2004-arm64-small
+    tags: ["nightly-driver"]
+    tasks:
+  <% for (const { taskName, executableOsId } of packageSmokeTestTasks) {
+      if (executableOsId.includes('linux-arm64')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: exec_connectitivty_tests_docker_x64_openssl11
+    display_name: "executable connectivity tests (x64 Docker for OpenSSL 1.1 base OS)"
+    run_on: ubuntu2004-small
+    tags: ["nightly-driver"]
+    tasks:
+  <% for (const { taskName, executableOsId } of executableConnectivityTests) {
+      if (executableOsId.includes('linux-x64') && !taskName.includes('openssl3')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: exec_connectitivty_tests_docker_arm64_openssl11
+    display_name: "executable connectivity tests (arm64 Docker for OpenSSL 1.1 base OS)"
+    run_on: ubuntu2004-arm64-small
+    tasks:
+  <% for (const { taskName, executableOsId } of executableConnectivityTests) {
+      if (executableOsId.includes('linux-arm64') && !taskName.includes('openssl3')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: exec_connectitivty_tests_docker_x64_openssl3
+    display_name: "executable connectivity tests (x64 Docker for OpenSSL 3 base OS)"
+    run_on: ubuntu2204-small
+    tags: ["nightly-driver"]
+    tasks:
+  <% for (const { taskName, executableOsId } of executableConnectivityTests) {
+      if (executableOsId.includes('linux-x64') && !taskName.includes('openssl11')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: exec_connectitivty_tests_docker_arm64_openssl3
+    display_name: "executable connectivity tests (arm64 Docker for OpenSSL 3 base OS)"
+    run_on: ubuntu2204-arm64-small
+    tasks:
+  <% for (const { taskName, executableOsId } of executableConnectivityTests) {
+      if (executableOsId.includes('linux-arm64') && !taskName.includes('openssl11')) { %>
+      - name: <% out(taskName) %>
+  <% } } %>
+  - name: pkg_smoke_tests_win32
+    display_name: "package smoke tests (win32)"
+    run_on: ubuntu2004-small
+    tasks:
+      - name: pkg_test_ssh_win32_x64
+      - name: pkg_test_ssh_win32msi_x64
+  - name: pkg_smoke_tests_macos_1100_x64
+    display_name: "package smoke tests (macos 11.00 x64)"
+    run_on: macos-11
+    tasks:
+      - name: pkg_test_macos_darwin_x64
+  - name: pkg_smoke_tests_macos_1100_arm64
+    display_name: "package smoke tests (macos 11.00 arm64)"
+    run_on: macos-11-arm64
+    tasks:
+      - name: pkg_test_macos_darwin_arm64
+  - name: pkg_smoke_tests_macos_1300_arm64
+    display_name: "package smoke tests (macos 13.00 arm64)"
+    run_on: macos-13-arm64
+    tasks:
+      - name: pkg_test_macos_darwin_arm64
+  - name: pkg_smoke_tests_macos_1400_x64
+    display_name: "package smoke tests (macos 14.00 x64)"
+    run_on: macos-14
+    tasks:
+      - name: pkg_test_macos_darwin_x64
+  - name: pkg_smoke_tests_macos_1400_arm64
+    display_name: "package smoke tests (macos 14.00 arm64)"
+    run_on: macos-14-arm64
+    tasks:
+      - name: pkg_test_macos_darwin_arm64
+  - name: pkg_smoke_tests_rhel7_s390x
+    display_name: "package smoke tests (RHEL 7 s390x)"
+    run_on: rhel7-zseries-small
+    expansions:
+      no_automatic_encryption_support: 1
+    tasks:
+      - name: pkg_test_rpmextract_rpm_s390x
+  - name: pkg_smoke_tests_rhel8_s390x
+    display_name: "package smoke tests (RHEL 8 s390x)"
+    run_on: rhel8-zseries-small
+    tasks:
+      - name: pkg_test_rpmextract_rpm_s390x
+  - name: pkg_smoke_tests_rhel9_s390x
+    display_name: "package smoke tests (RHEL 9 s390x)"
+    run_on: rhel9-zseries-small
+    tasks:
+      - name: pkg_test_rpmextract_rpm_s390x
+  - name: pkg_smoke_tests_rhel8_ppc64le
+    display_name: "package smoke tests (RHEL 8 ppc64le)"
+    run_on: rhel8-power-small
+    tasks:
+      - name: pkg_test_rpmextract_rpm_ppc64le
+  - name: pkg_smoke_tests_rhel9_ppc64le
+    display_name: "package smoke tests (RHEL 9 ppc64le)"
+    run_on: rhel9-power-small
+    tasks:
+      - name: pkg_test_rpmextract_rpm_ppc64le
+  - name: draft_publish_release
+    display_name: "Draft/Publish Release"
+    run_on: ubuntu2004-small
+    tasks:
+      - name: release_draft
+      - name: release_publish_dry_run
+      - name: release_publish
+
+  - name: generate_license_and_vulnerability_report
+    display_name: "License and Vulnerability Report"
+    run_on: ubuntu2004-small
+    tasks:
+      - name: generate_license_and_vulnerability_report
+
+  - name: perf_tests_linux_x64
+    display_name: "Performance Tests (x64 Linux)"
+    run_on: rhel90-dbx-perf-large
+    tasks:
+      - name: perf_tests_linux_x64
