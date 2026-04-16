@@ -1,5 +1,5 @@
 The following third-party software is used by and included in **mongosh**.
-This document was automatically generated on Mon Apr 13 2026.
+This document was automatically generated on Wed Apr 15 2026.
 
 ## List of dependencies
 
@@ -163,7 +163,7 @@ Package|Version|License
 **[available-typed-arrays](#b26a9227325a0e2f27e4793244a52200e15f63f970e71f86ead22e0f696c4a41)**|1.0.7|MIT
 **[base64-js](#cf278cb8d073b3bd22b60816c2ba78b69043aec6bcd673437b4c1db3375153d6)**|1.5.1|MIT
 **[baseline-browser-mapping](#bacc0480d6bdcf9547fbcfa53fcc4c0feb578efac43b4a8cac173c61a9f25d85)**|2.9.19|Apache-2.0
-**[basic-ftp](#da192bb3a89fc6c761608c0f6e78c2f75e839e0a8be4c9b49b3d2640524f05ee)**|5.2.0|MIT
+**[basic-ftp](#31f3b30d9604f55c561ecd7584cd87af184b71534de64bc4bbe2b1f1f28a9d3a)**|5.2.2|MIT
 **[bcrypt-pbkdf](#b6b5900f1e48a933591abc1c918fbcc9c890b3d071f607c59d704bc1c13b3937)**|1.0.2|BSD-3-Clause
 **[bignumber.js](#72ac920aeb92af6ca1db48e34a5fb141e8e8e98ad9fab1e2223c1ecc8b539f73)**|9.3.1|MIT
 **[bindings](#acdb65ce90d2786593049f690752613250632fd5aeaa2960152abc4f0e8f3a44)**|1.5.0|MIT
@@ -341,7 +341,7 @@ Package|Version|License
 **[jsonfile](#1504ddbe5031429f6d90bb02373b4629ff5da9ef4e869d5015ff42f685817e74)**|6.1.0|MIT
 **[kerberos](#118e57a43325eba33fbd06ce570305305296ff20b64f9c885d90306d4abce40e)**|7.0.0|Apache-2.0
 **[lodash.merge](#996e40d63a94f1b8693d7c81e0cdfb874c6432d6bbd675976fc1b6b13652c8db)**|4.6.2|MIT
-**[lodash](#22f51d3e8133cb84c9c410b8485c738362f6bf7ad6e2057f6eabc4b65442425f)**|4.17.23|MIT
+**[lodash](#02c5607a9d3316c6c04fcbf8d5fb61810668de71f499205765e125fd4829cd17)**|4.18.1|MIT
 **[lowlight](#6efc5090c0eda3b461d933d6b79bddcdf8165a10aea9f39ac76620ce5fb05bf5)**|1.17.0|MIT
 **[lru-cache](#10c5739147749b9d7134807a14c5667fe20576f24b327fc73f216b03a78a6052)**|11.2.2|ISC
 **[lru-cache](#fe7f0a2f2cf4c92f13c3a2a63f14f80f20f6919979306dc054e4f947c1234651)**|5.1.1|ISC
@@ -21030,8 +21030,8 @@ License files:
       
 
 
-<a id="da192bb3a89fc6c761608c0f6e78c2f75e839e0a8be4c9b49b3d2640524f05ee"></a>
-### [basic-ftp](https://www.npmjs.com/package/basic-ftp) (version 5.2.0)
+<a id="31f3b30d9604f55c561ecd7584cd87af184b71534de64bc4bbe2b1f1f28a9d3a"></a>
+### [basic-ftp](https://www.npmjs.com/package/basic-ftp) (version 5.2.2)
 License tags: MIT
 
 License files:
@@ -28124,8 +28124,8 @@ License files:
       
 
 
-<a id="22f51d3e8133cb84c9c410b8485c738362f6bf7ad6e2057f6eabc4b65442425f"></a>
-### [lodash](https://www.npmjs.com/package/lodash) (version 4.17.23)
+<a id="02c5607a9d3316c6c04fcbf8d5fb61810668de71f499205765e125fd4829cd17"></a>
+### [lodash](https://www.npmjs.com/package/lodash) (version 4.18.1)
 License tags: MIT
 
 License files:
