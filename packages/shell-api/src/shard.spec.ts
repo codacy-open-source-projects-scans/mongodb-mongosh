@@ -2200,6 +2200,39 @@ describe('Shard', function () {
         );
       });
 
+      it('passes a filter through to runCommandWithCheck when provided', async function () {
+        await shard.listShards({ draining: true });
+
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            listShards: 1,
+            filter: { draining: true },
+          }
+        );
+      });
+
+      it('does not send a filter when called with no arguments', async function () {
+        await shard.listShards();
+
+        const call = serviceProvider.runCommandWithCheck
+          .getCalls()
+          .find((c) => (c.args[1] as Document).listShards === 1);
+        expect(call?.args[1]).to.not.have.property('filter');
+      });
+
+      it('sends an empty filter when one is given explicitly', async function () {
+        await shard.listShards({});
+
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            listShards: 1,
+            filter: {},
+          }
+        );
+      });
+
       it('returns the shards returned by runCommandWithCheck', async function () {
         serviceProvider.runCommandWithCheck.resolves({
           ok: 1,
@@ -2356,6 +2389,119 @@ describe('Shard', function () {
           msg: 'not dbgrid',
         });
         await shard.isConfigShardEnabled();
+        expect(warnSpy.calledOnce).to.be.true;
+      });
+    });
+
+    describe('shardDrainingStatus', function () {
+      this.beforeEach(function () {
+        serviceProvider.runCommandWithCheck.resolves({
+          ok: 1,
+          msg: 'isdbgrid',
+        });
+      });
+
+      it('calls serviceProvider.runCommandWithCheck without a shardId', async function () {
+        await shard.shardDrainingStatus();
+
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            shardDrainingStatus: 1,
+          }
+        );
+      });
+
+      it('calls serviceProvider.runCommandWithCheck with a shardId', async function () {
+        await shard.shardDrainingStatus('shard1');
+
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            shardDrainingStatus: 'shard1',
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        serviceProvider.runCommandWithCheck
+          .onCall(0)
+          .resolves({ ok: 1, msg: 'isdbgrid' });
+        const expectedResult = { ok: 1, state: 'started' };
+        serviceProvider.runCommandWithCheck.onCall(1).resolves(expectedResult);
+        const result = await shard.shardDrainingStatus('shard1');
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        serviceProvider.runCommandWithCheck
+          .onCall(0)
+          .resolves({ ok: 1, msg: 'isdbgrid' });
+        const expectedError = new Error('unreachable');
+        serviceProvider.runCommandWithCheck.onCall(1).rejects(expectedError);
+        const caughtError = await shard
+          .shardDrainingStatus('shard1')
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+
+      it('throws if not mongos', async function () {
+        serviceProvider.runCommandWithCheck.resolves({
+          ok: 1,
+          msg: 'not dbgrid',
+        });
+        await shard.shardDrainingStatus();
+        expect(warnSpy.calledOnce).to.be.true;
+      });
+    });
+
+    describe('getTransitionToDedicatedConfigServerStatus', function () {
+      this.beforeEach(function () {
+        serviceProvider.runCommandWithCheck.resolves({
+          ok: 1,
+          msg: 'isdbgrid',
+        });
+      });
+
+      it('calls serviceProvider.runCommandWithCheck', async function () {
+        await shard.getTransitionToDedicatedConfigServerStatus();
+
+        expect(serviceProvider.runCommandWithCheck).to.have.been.calledWith(
+          ADMIN_DB,
+          {
+            getTransitionToDedicatedConfigServerStatus: 1,
+          }
+        );
+      });
+
+      it('returns whatever serviceProvider.runCommandWithCheck returns', async function () {
+        serviceProvider.runCommandWithCheck
+          .onCall(0)
+          .resolves({ ok: 1, msg: 'isdbgrid' });
+        const expectedResult = { ok: 1, state: 'started' };
+        serviceProvider.runCommandWithCheck.onCall(1).resolves(expectedResult);
+        const result = await shard.getTransitionToDedicatedConfigServerStatus();
+        expect(result).to.deep.equal(expectedResult);
+      });
+
+      it('throws if serviceProvider.runCommandWithCheck rejects', async function () {
+        serviceProvider.runCommandWithCheck
+          .onCall(0)
+          .resolves({ ok: 1, msg: 'isdbgrid' });
+        const expectedError = new Error('unreachable');
+        serviceProvider.runCommandWithCheck.onCall(1).rejects(expectedError);
+        const caughtError = await shard
+          .getTransitionToDedicatedConfigServerStatus()
+          .catch((e) => e);
+        expect(caughtError).to.equal(expectedError);
+      });
+
+      it('throws if not mongos', async function () {
+        serviceProvider.runCommandWithCheck.resolves({
+          ok: 1,
+          msg: 'not dbgrid',
+        });
+        await shard.getTransitionToDedicatedConfigServerStatus();
         expect(warnSpy.calledOnce).to.be.true;
       });
     });
@@ -3413,15 +3559,20 @@ describe('Shard', function () {
           for (const shard of Object.values(result.shards) as any) {
             expect(shard.totalSize).to.be.a('number');
             expect(shard.indexDetails).to.equal(undefined);
-            expect(shard.timeseries.bucketsNs).to.equal(
-              `${dbName}.system.buckets.${timeseriesCollectionName}`
-            );
+            // Newer servers no longer expose the explicit buckets namespace
+            // for timeseries collections (viewless timeseries), so accept both
+            // the legacy `system.buckets.` namespace and the user namespace.
+            expect(shard.timeseries.bucketsNs).to.be.oneOf([
+              `${dbName}.system.buckets.${timeseriesCollectionName}`,
+              `${dbName}.${timeseriesCollectionName}`,
+            ]);
             expect(shard.timeseries.numBucketUpdates).to.equal(0);
             expect(typeof result.timeseries.bucketCount).to.equal('number');
           }
-          expect(result.timeseries.bucketsNs).to.equal(
-            `${dbName}.system.buckets.${timeseriesCollectionName}`
-          );
+          expect(result.timeseries.bucketsNs).to.be.oneOf([
+            `${dbName}.system.buckets.${timeseriesCollectionName}`,
+            `${dbName}.${timeseriesCollectionName}`,
+          ]);
           expect(result.timeseries.bucketCount).to.equal(1);
           expect(result.timeseries.numBucketInserts).to.equal(1);
         });

@@ -63,7 +63,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     mVersion: 'stable',
   },
   {
-    displayName: 'RHEL 9.3 x64',
+    displayName: 'RHEL 9.3 x64 (fips host)',
     runOn: 'rhel93-fips',
     tags: ['nightly-driver'],
     executableOsId: 'linux-x64',
@@ -115,7 +115,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     runOn: 'ubuntu2004-small',
     tags: ['nightly-driver'],
     executableOsId: 'linux-x64',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'Ubuntu 20.04 x64',
@@ -123,7 +123,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     tags: ['nightly-driver'],
     sharedOpenSsl: 'openssl11',
     executableOsId: 'linux-x64-openssl11',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'Ubuntu 22.04 x64',
@@ -223,14 +223,14 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     displayName: 'Ubuntu 20.04 arm64',
     runOn: 'ubuntu2004-arm64-small',
     executableOsId: 'linux-arm64',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'Ubuntu 20.04 arm64',
     runOn: 'ubuntu2004-arm64-small',
     sharedOpenSsl: 'openssl11',
     executableOsId: 'linux-arm64-openssl11',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'Ubuntu 22.04 arm64',
@@ -263,7 +263,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     runOn: 'ubuntu2404-arm64-small',
     sharedOpenSsl: 'openssl3',
     executableOsId: 'linux-arm64-openssl3',
-    mVersion: '8.3.0-rc5',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'Amazon Linux 2 arm64',
@@ -281,7 +281,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     displayName: 'Amazon Linux 2023 arm64',
     runOn: 'amazon2023.0-arm64-small',
     executableOsId: 'linux-arm64',
-    mVersion: '8.3.0-rc5',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'RHEL 8.2 arm64',
@@ -336,19 +336,27 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     displayName: 'RHEL 8 PPC',
     runOn: 'rhel8-power-small',
     executableOsId: 'linux-ppc64le',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'RHEL 9 PPC',
     runOn: 'rhel9-power-small',
     executableOsId: 'linux-ppc64le',
-    mVersion: 'stable',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'RHEL 9 PPC',
     runOn: 'rhel9-power-small',
-    executableOsId: 'linux-ppc64le',
-    mVersion: '8.3.0-rc5',
+    sharedOpenSsl: 'openssl11',
+    executableOsId: 'linux-ppc64le-openssl11',
+    mVersion: '8.3.x',
+  },
+  {
+    displayName: 'RHEL 9 PPC',
+    runOn: 'rhel9-power-small',
+    sharedOpenSsl: 'openssl3',
+    executableOsId: 'linux-ppc64le-openssl3',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'RHEL 7 s390x',
@@ -371,8 +379,22 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
   {
     displayName: 'RHEL 9 s390x',
     runOn: 'rhel9-zseries-small',
+    sharedOpenSsl: 'openssl11',
+    executableOsId: 'linux-s390x-openssl11',
+    mVersion: 'stable',
+  },
+  {
+    displayName: 'RHEL 9 s390x',
+    runOn: 'rhel9-zseries-small',
+    sharedOpenSsl: 'openssl3',
+    executableOsId: 'linux-s390x-openssl3',
+    mVersion: 'stable',
+  },
+  {
+    displayName: 'RHEL 9 s390x',
+    runOn: 'rhel9-zseries-small',
     executableOsId: 'linux-s390x',
-    mVersion: '8.3.0-rc5',
+    mVersion: '8.3.x',
   },
   {
     displayName: 'MacOS 15 Sequoia (amd64)',
@@ -408,18 +430,18 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     displayName: 'MacOS 14 arm64',
     runOn: 'macos-14-arm64',
     executableOsId: 'darwin-arm64',
-    mVersion: '8.3.0-rc5',
+    mVersion: '8.3.x',
   },
   {
-    displayName: 'MacOS Big Sur',
+    displayName: 'MacOS 14',
     id: 'darwin',
-    runOn: 'macos-13',
+    runOn: 'macos-14',
     executableOsId: 'darwin-x64',
     mVersion: '8.0.5',
   },
   {
-    displayName: 'MacOS Big Sur arm64',
-    runOn: 'macos-13-arm64',
+    displayName: 'MacOS 14 arm64',
+    runOn: 'macos-14-arm64',
     id: 'darwin_arm64',
     executableOsId: 'darwin-arm64',
     mVersion: '8.0.5',
@@ -431,10 +453,15 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     ],
   },
   {
+    // Server 8.3+ binaries are built with Windows SDK 10.0.26100.0 and fail to
+    // load on Windows Server 2019 (missing GetProcessWorkingSetSize in the
+    // api-ms-win-core-memory-l1-1-1 API set; see SERVER-116018, closed as
+    // Works as Designed). Pin pre-2022 Windows to the newest server versions
+    // that still run there instead of `stable`.
     displayName: 'Windows VS pre-2022',
     runOn: 'windows-vsCurrent-small',
     executableOsId: 'win32',
-    mVersion: 'stable',
+    mVersion: '8.0.x',
   },
   {
     displayName: 'Windows VS pre-2022',
@@ -456,7 +483,7 @@ exports.E2E_TESTS_BUILD_VARIANTS = [
     displayName: 'Windows VS 2022',
     runOn: 'windows-2022-latest-small',
     executableOsId: 'win32',
-    mVersion: '8.3.0-rc5',
+    mVersion: '8.3.x',
   },
 ]
   .filter(({ disabled }) => disabled !== true)

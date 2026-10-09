@@ -73,6 +73,7 @@ describe('getConnectInfo', function () {
       server_os: 'osx',
       uri: ATLAS_URI_WITH_AUTH,
       is_local_atlas: false,
+      is_srv: true,
     };
     expect(
       getConnectExtraInfo({
@@ -106,6 +107,7 @@ describe('getConnectInfo', function () {
       server_os: 'osx',
       uri: ATLAS_URI,
       is_local_atlas: false,
+      is_srv: true,
     };
     expect(
       getConnectExtraInfo({
@@ -141,6 +143,7 @@ describe('getConnectInfo', function () {
       node_version: process.version,
       server_os: 'osx',
       uri: streamUri,
+      is_srv: false,
     };
     expect(
       getConnectExtraInfo({
@@ -175,6 +178,7 @@ describe('getConnectInfo', function () {
       server_os: 'osx',
       uri: '',
       is_local_atlas: true,
+      is_srv: undefined,
     };
     expect(
       getConnectExtraInfo({
@@ -185,6 +189,84 @@ describe('getConnectInfo', function () {
         serverName: 'mongodb',
       })
     ).to.deep.equal(output);
+  });
+
+  describe('host information', function () {
+    const hostInfo = ({
+      resolvedHostname,
+      uri,
+    }: {
+      resolvedHostname?: string;
+      uri?: string;
+    }) => {
+      const { is_localhost, is_atlas_url, is_do_url } = getConnectExtraInfo({
+        connectionString: uri ? new ConnectionString(uri) : undefined,
+        buildInfo: BUILD_INFO,
+        atlasVersion: null,
+        resolvedHostname,
+        isLocalAtlas: false,
+        serverName: 'mongodb',
+      });
+      return { is_localhost, is_atlas_url, is_do_url };
+    };
+
+    const LOCALHOST = {
+      is_localhost: true,
+      is_atlas_url: false,
+      is_do_url: false,
+    };
+
+    it('falls back to the seed host, not the credential-bearing uri', function () {
+      expect(
+        hostInfo({ uri: 'mongodb://admin:hunter2@localhost:27017' })
+      ).to.deep.equal(LOCALHOST);
+    });
+
+    it('ignores an empty resolved hostname', function () {
+      expect(
+        hostInfo({ resolvedHostname: '', uri: 'mongodb://localhost:27017' })
+      ).to.deep.equal(LOCALHOST);
+    });
+
+    it('strips the port from the resolved hostname', function () {
+      expect(hostInfo({ resolvedHostname: 'localhost:27017' })).to.deep.equal(
+        LOCALHOST
+      );
+    });
+
+    it('handles a bracketed IPv6 resolved hostname', function () {
+      expect(hostInfo({ resolvedHostname: '[::1]:27017' })).to.deep.equal(
+        LOCALHOST
+      );
+    });
+
+    // The driver reports `hostAddress.host` without brackets, but
+    // `mongodb-build-info` only recognises the bracketed form.
+    it('brackets a bare IPv6 resolved hostname', function () {
+      expect(hostInfo({ resolvedHostname: '::1' })).to.deep.equal(LOCALHOST);
+    });
+
+    it('handles an IPv6 seed host', function () {
+      expect(hostInfo({ uri: 'mongodb://[::1]:27017' })).to.deep.equal(
+        LOCALHOST
+      );
+    });
+
+    it('returns the defaults when there is no host at all', function () {
+      expect(hostInfo({})).to.deep.equal({
+        is_localhost: false,
+        is_atlas_url: false,
+        is_do_url: false,
+      });
+    });
+
+    it('detects an atlas seed host', function () {
+      expect(hostInfo({ uri: ATLAS_URI })).to.deep.equal({
+        is_localhost: false,
+        is_atlas_url: true,
+        is_do_url: false,
+      });
+    });
   });
 
   it('does not fail when buildInfo is unavailable', function () {
@@ -207,6 +289,7 @@ describe('getConnectInfo', function () {
       server_arch: undefined,
       uri: '',
       is_local_atlas: false,
+      is_srv: undefined,
     };
     expect(
       getConnectExtraInfo({

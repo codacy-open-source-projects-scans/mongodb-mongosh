@@ -1,4 +1,5 @@
-// ^ segment data is in snake_case: forgive me javascript, for i have sinned.
+// The telemetry format came from legacy Segment, which stores data in snake_case.
+// Forgive me javascript, for i have sinned.
 
 import * as getBuildInfo from 'mongodb-build-info';
 import type { ConnectionString } from 'mongodb-connection-string-url';
@@ -19,6 +20,11 @@ export type ConnectionExtraInfo = {
   node_version?: string;
   uri: string;
   is_local_atlas?: boolean;
+  is_srv?: boolean;
+  topology_type?: string;
+  is_csfle?: boolean;
+  has_csfle_schema?: boolean;
+  connection_id?: string;
 } & HostInformation;
 
 export type HostInformation = {
@@ -26,6 +32,40 @@ export type HostInformation = {
   is_atlas_url?: boolean;
   is_do_url?: boolean; // Is digital ocean url.
 };
+
+// Strips the port from a `host:port` address. IPv6 hosts are returned in
+// bracketed form, which is what `mongodb-build-info` matches against, and which
+// the driver's `hostAddress.host` does not use.
+function extractHostname(address?: string): string | undefined {
+  if (!address) {
+    return undefined;
+  }
+
+  if (address.startsWith('[')) {
+    const host = address.slice(1).split(']')[0];
+    return host ? `[${host}]` : undefined;
+  }
+
+  // A bare IPv6 address has more than one colon, so it has no port to strip.
+  if (address.indexOf(':') !== address.lastIndexOf(':')) {
+    return `[${address}]`;
+  }
+
+  return address.split(':')[0] || undefined;
+}
+
+// Prefers the address of the server we actually talked to, falling back to the
+// seed host from the connection string when the topology has not been populated.
+// Both sources are credential-free, unlike the connection string itself.
+function getResolvedHostname(
+  resolvedHostname?: string,
+  connectionString?: ConnectionString
+): string | undefined {
+  return (
+    extractHostname(resolvedHostname) ??
+    extractHostname(connectionString?.hosts[0])
+  );
+}
 
 function getHostInformation(host?: string): HostInformation {
   if (!host) {
@@ -87,8 +127,11 @@ export default function getConnectExtraInfo({
   const isAtlas = !!atlasVersion?.atlasVersion || getBuildInfo.isAtlas(uri);
 
   return {
-    ...getHostInformation(resolvedHostname || uri),
+    ...getHostInformation(
+      getResolvedHostname(resolvedHostname, connectionString)
+    ),
     is_atlas: isAtlas,
+    is_srv: connectionString?.isSRV,
     server_version: buildInfo.version,
     node_version: process.version,
     server_os: serverOs || undefined,

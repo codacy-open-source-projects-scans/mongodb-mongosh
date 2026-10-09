@@ -1,40 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import type {
-  IdentifyParams as SegmentIdentifyParams,
-  TrackParams as SegmentTrackParams,
-} from '@segment/analytics-node';
-
-type Timestamp = SegmentTrackParams['timestamp'];
-
-export type MongoshAnalyticsIdentity = SegmentIdentifyParams;
-
-export type AnalyticsIdentifyMessage = MongoshAnalyticsIdentity & {
-  traits: {
-    platform: string;
-    session_id: string;
-    device_id: string;
-  } & SegmentIdentifyParams['traits'];
-};
-
-export type AnalyticsTrackMessage = MongoshAnalyticsIdentity & {
-  event: string;
-  properties: {
-    mongosh_version: string;
-    session_id: string;
-    [key: string]: any;
-  };
-  timestamp?: Timestamp;
-};
+import type { TelemetryEvent } from './telemetry-events';
 
 /**
- * General interface for an Analytics provider that mongosh can use.
+ * General interface for a telemetry provider that mongosh can use.
+ * All events are routed through the single track() method.
  */
 export interface MongoshAnalytics {
-  identify(message: AnalyticsIdentifyMessage): void;
-
-  track(message: AnalyticsTrackMessage): void;
-
+  track(event: TelemetryEvent): void;
   flush(): Promise<void>;
 }
 
@@ -79,30 +52,15 @@ class Queue<T> {
 }
 
 /**
- * A no-op implementation of MongoshAnalytics that can be used when
- * actually connecting to the telemetry provider is not possible
- * (e.g. because we are running without an API key).
+ * A no-op implementation of MongoshAnalytics used when telemetry is unavailable.
  */
 export class NoopAnalytics implements MongoshAnalytics {
-  identify(): void {}
-  track(): void {}
+  track(): void {
+    // no-op
+  }
   flush() {
     return Promise.resolve();
   }
-}
-
-type AnalyticsEventsQueueItem =
-  | ['identify', Parameters<MongoshAnalytics['identify']>]
-  | ['track', Parameters<MongoshAnalytics['track']>];
-
-function addTimestamp<T extends { timestamp?: Timestamp }>(
-  message: T
-): T & { timestamp: Timestamp } {
-  const timestampDate =
-    message.timestamp instanceof Date || message.timestamp === undefined
-      ? message.timestamp
-      : new Date(message.timestamp);
-  return { ...message, timestamp: timestampDate };
 }
 
 /**
@@ -110,70 +68,29 @@ function addTimestamp<T extends { timestamp?: Timestamp }>(
  * and can be enabled/paused/disabled.
  */
 export class ToggleableAnalytics implements MongoshAnalytics {
-  _queue = new Queue<AnalyticsEventsQueueItem>((item) => {
-    if (item[0] === 'identify') {
-      this._target.identify(...item[1]);
-    }
-    if (item[0] === 'track') {
-      this._target.track(...item[1]);
-    }
+  _queue = new Queue<TelemetryEvent>((event) => {
+    this._target.track(event);
   });
   _target: MongoshAnalytics;
-  _pendingError?: Error;
 
   constructor(target: MongoshAnalytics = new NoopAnalytics()) {
     this._target = target;
   }
 
-  identify(...args: Parameters<MongoshAnalytics['identify']>): void {
-    this._validateArgs(args);
-    this._queue.push(['identify', [addTimestamp(args[0])]]);
-  }
-
-  track(...args: Parameters<MongoshAnalytics['track']>): void {
-    this._validateArgs(args);
-    this._queue.push(['track', [addTimestamp(args[0])]]);
+  track(event: TelemetryEvent): void {
+    this._queue.push(event);
   }
 
   enable() {
-    if (this._pendingError) {
-      throw this._pendingError;
-    }
     this._queue.enable();
   }
 
   disable() {
-    this._pendingError = undefined;
     this._queue.disable();
   }
 
   pause() {
     this._queue.pause();
-  }
-
-  _validateArgs([firstArg]: [MongoshAnalyticsIdentity]): void {
-    // Validate that the first argument of a track() or identify() call has
-    // a .userId or .anonymousId property set.
-    // This validation is also performed by the segment package, but is done
-    // here for two reasons: One, if telemetry is disabled, then we lose the
-    // stack trace information for where the buggy call came from, and two,
-    // this way the validation affects all tests in CI, not just the ones that
-    // are explicitly written to enable telemetry to a fake endpoint.
-    if (
-      !('userId' in firstArg && firstArg.userId) &&
-      !('anonymousId' in firstArg && firstArg.anonymousId)
-    ) {
-      const err = new Error('Telemetry setup is missing userId or anonymousId');
-      switch (this._queue.getState()) {
-        case 'enabled':
-          throw err;
-        case 'paused':
-          this._pendingError ??= err;
-          break;
-        default:
-          break;
-      }
-    }
   }
 
   async flush(): Promise<void> {
@@ -183,6 +100,8 @@ export class ToggleableAnalytics implements MongoshAnalytics {
 
 type ThrottledAnalyticsOptions = {
   target: MongoshAnalytics;
+  /** Stable identifier used to key cross-session throttle state. */
+  currentSessionId: string;
   /**
    * Throttling options. If not provided, throttling is disabled (default: null)
    */
@@ -218,19 +137,26 @@ async function lockfile(
     // created by long running process (longer than staleDuration) we make sure
     // that another process doesn't consider lockfile stale
     intervalId = setInterval(() => {
-      const now = Date.now();
-      fs.promises.utimes(lockfilePath, now, now).catch(() => {});
+      // Use Dates so that utimes() cannot interpret the time wrong: it reads
+      // plain numbers as seconds, and milliseconds would silently become a
+      // date thousands of years from now.
+      const now = new Date();
+      fs.promises.utimes(lockfilePath, now, now).catch(() => {
+        // ignore errors refreshing the lockfile mtime
+      });
     }, staleDuration / 2);
     intervalId.unref?.();
     return unlock;
   } catch (e) {
-    if ((e as any).code !== 'EEXIST') {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw e;
     }
     const stats = await fs.promises.stat(lockfilePath);
-    // To make sure that the lockfile is not just a leftover from an unclean
-    // process exit, we check whether or not it is stale
-    if (Date.now() - stats.mtimeMs > staleDuration) {
+    // A lock's mtime is written by whichever process holds it,
+    // so a legitimate mtime is always now or in the past.
+    // The margin avoids stealing a lock that was just created.
+    const age = Date.now() - stats.mtimeMs;
+    if (age > staleDuration || age < -staleDuration) {
       await fs.promises.rmdir(lockfilePath);
       return lockfile(filepath, staleDuration);
     }
@@ -239,67 +165,64 @@ async function lockfile(
 }
 
 export class ThrottledAnalytics implements MongoshAnalytics {
-  private trackQueue = new Queue<AnalyticsTrackMessage>((message) => {
+  private trackQueue = new Queue<TelemetryEvent>((event) => {
     if (this.shouldEmitAnalyticsEvent()) {
-      this.target.track(message);
+      this.target.track(event);
       this.throttleState.count++;
     }
   });
-  private target: ThrottledAnalyticsOptions['target'] = new NoopAnalytics();
-  private currentUserId: string | null = null;
+  private target: MongoshAnalytics;
+  private currentSessionId: string | null = null;
   private throttleOptions: ThrottledAnalyticsOptions['throttle'] = null;
   private throttleState = { count: 0, timestamp: Date.now() };
   private restorePromise: Promise<void> = Promise.resolve();
   private unlock: () => Promise<void> = () => Promise.resolve();
 
-  constructor({ target, throttle }: Partial<ThrottledAnalyticsOptions> = {}) {
-    this.target = target ?? this.target;
+  constructor({
+    target,
+    currentSessionId,
+    throttle,
+  }: Partial<ThrottledAnalyticsOptions> = {}) {
+    this.target = target ?? new NoopAnalytics();
     this.throttleOptions = throttle ?? this.throttleOptions;
+    if (currentSessionId) {
+      // Start restore immediately so the lockfile is acquired before the first
+      // track() call, rather than being deferred until the first event arrives.
+      this.beginRestore(currentSessionId);
+    }
   }
 
-  get metadataPath() {
-    if (!this.throttleOptions) {
-      throw new Error(
-        'Metadata path is not avaialble if throttling is disabled'
-      );
-    }
-
-    if (!this.currentUserId) {
-      throw new Error('Metadata path is not avaialble if userId is not set');
-    }
-
-    const {
-      throttleOptions: { metadataPath },
-      currentUserId: userId,
-    } = this;
-
-    return path.resolve(metadataPath, `am-${userId}.json`);
-  }
-
-  identify(message: AnalyticsIdentifyMessage): void {
-    message = addTimestamp(message);
-    if (this.currentUserId) {
-      throw new Error('Identify can only be called once per user session');
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    this.currentUserId = message.userId ?? message.anonymousId!;
-
+  private beginRestore(sessionId: string): void {
+    this.currentSessionId = sessionId;
     this.restorePromise = this.restoreThrottleState().then((enabled) => {
       if (!enabled) {
         this.trackQueue.disable();
         return;
       }
-      if (this.shouldEmitAnalyticsEvent()) {
-        this.target.identify(message);
-        this.throttleState.count++;
-      }
       this.trackQueue.enable();
     });
   }
 
-  track(message: AnalyticsTrackMessage): void {
-    this.trackQueue.push(addTimestamp(message));
+  get metadataPath() {
+    if (!this.throttleOptions) {
+      throw new Error(
+        'Metadata path is not available if throttling is disabled'
+      );
+    }
+    if (!this.currentSessionId) {
+      throw new Error('Metadata path is not available if sessionId is not set');
+    }
+    return path.resolve(
+      this.throttleOptions.metadataPath,
+      `am-${this.currentSessionId}.json`
+    );
+  }
+
+  track(event: TelemetryEvent): void {
+    if (!this.currentSessionId) {
+      this.beginRestore(event.payload.session_id);
+    }
+    this.trackQueue.push(event);
   }
 
   // Tries to restore persisted throttle state and returns `true` if telemetry can
@@ -310,11 +233,11 @@ export class ThrottledAnalytics implements MongoshAnalytics {
     if (!this.throttleOptions) {
       return true;
     }
-
-    if (!this.currentUserId) {
-      throw new Error('Trying to restore throttle state before userId is set');
+    if (!this.currentSessionId) {
+      throw new Error(
+        'Trying to restore throttle state before sessionId is set'
+      );
     }
-
     try {
       this.unlock = await lockfile(
         this.metadataPath,
@@ -325,20 +248,18 @@ export class ThrottledAnalytics implements MongoshAnalytics {
       // unexpected happens, in either case we disable telemetry
       return false;
     }
-
     try {
       this.throttleState = JSON.parse(
         await fs.promises.readFile(this.metadataPath, 'utf8')
       );
     } catch (e) {
-      if ((e as any).code !== 'ENOENT') {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
         // Any error except ENOENT means that we failed to restore state for
         // some unknown / unexpected reason, ignore the error and assume that it
         // is not safe to enable telemetry in that case
         return false;
       }
     }
-
     return true;
   }
 
@@ -365,53 +286,21 @@ export class ThrottledAnalytics implements MongoshAnalytics {
       await this.target.flush();
       return;
     }
-
-    if (!this.currentUserId) {
-      throw new Error('Trying to persist throttle state before userId is set');
+    if (!this.currentSessionId) {
+      throw new Error(
+        'Trying to persist throttle state before sessionId is set'
+      );
     }
-
     try {
       await this.restorePromise;
     } catch {
       // Ignored.
     }
-
     await fs.promises.writeFile(
       this.metadataPath,
       JSON.stringify(this.throttleState)
     );
     await this.unlock();
     await this.target.flush();
-  }
-}
-
-type SampledAnalyticsOptions = {
-  target?: MongoshAnalytics;
-  sampling: () => boolean;
-};
-
-export class SampledAnalytics implements MongoshAnalytics {
-  private isEnabled: boolean;
-  private target: MongoshAnalytics;
-
-  constructor(configuration: SampledAnalyticsOptions) {
-    this.isEnabled = configuration.sampling();
-    this.target = configuration.target || new NoopAnalytics();
-  }
-
-  get enabled(): boolean {
-    return this.isEnabled;
-  }
-
-  identify(message: AnalyticsIdentifyMessage): void {
-    this.isEnabled && this.target.identify(message);
-  }
-
-  track(message: AnalyticsTrackMessage): void {
-    this.isEnabled && this.target.track(message);
-  }
-
-  async flush(): Promise<void> {
-    return await this.target.flush();
   }
 }

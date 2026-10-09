@@ -66,6 +66,11 @@ export interface ConnectEvent {
   uri?: string;
   is_local_atlas?: boolean;
   is_atlas_url?: boolean;
+  is_srv?: boolean;
+  topology_type?: string;
+  is_csfle?: boolean;
+  has_csfle_schema?: boolean;
+  connection_id?: string;
 }
 
 export interface ScriptLoadFileEvent {
@@ -185,7 +190,7 @@ export interface FetchingUpdateMetadataCompleteEvent {
 
 export interface SessionStartedEvent {
   isInteractive: boolean;
-  jsContext: string;
+  jsContext: 'repl' | 'plain-vm';
   timings: {
     [category: string]: number;
   };
@@ -209,20 +214,6 @@ export interface MongoshBusEventsMap extends ConnectEventMap {
    * sessions or close on non-interactive sessions.
    */
   'mongosh:start-session': (ev: SessionStartedEvent) => void;
-  /**
-   * Signals that the shell is started by a new user.
-   */
-  'mongosh:new-user': (identity: {
-    userId: string;
-    anonymousId: string;
-  }) => void;
-  /**
-   * Signals a change of the user telemetry settings.
-   */
-  'mongosh:update-user': (identity: {
-    userId: string;
-    anonymousId?: string;
-  }) => void;
   /**
    * Signals an error that should be logged or potentially tracked by analytics.
    */
@@ -414,6 +405,12 @@ export interface MongoshBusEventsMap extends ConnectEventMap {
   ) => void;
   /** Signals that logging has been initialized. */
   'mongosh:log-initialized': () => void;
+  /**
+   * Signals that the cleanup of old log files is about to start. This session's
+   * log file must already exist at this point so that it counts towards
+   * logMaxFileCount/logRetentionGB.
+   */
+  'mongosh:log-cleanup-start': () => void;
 }
 
 export interface MongoshBus {
@@ -515,8 +512,6 @@ export class SnippetShellUserConfigValidator extends ShellUserConfigValidator {
 }
 
 export class CliUserConfig extends SnippetShellUserConfig {
-  userId = '';
-  telemetryAnonymousId = '';
   disableGreetingMessage = false;
   forceDisableTelemetry = false;
   inspectCompact: number | boolean = 3;
@@ -528,6 +523,7 @@ export class CliUserConfig extends SnippetShellUserConfig {
   oidcTrustedEndpoints: undefined | string[] = undefined;
   browser: undefined | false | string = undefined;
   updateURL = 'https://downloads.mongodb.com/compass/mongosh.json';
+  telemetryEndpoint = 'https://mongosh-telemetry.mongodb.com';
   disableLogging = false;
   logLocation: string | undefined = undefined;
   logRetentionDays = 30;
@@ -542,8 +538,6 @@ export class CliUserConfigValidator extends SnippetShellUserConfigValidator {
     value: CliUserConfig[K]
   ): Promise<string | null> {
     switch (key) {
-      case 'userId':
-      case 'telemetryAnonymousId':
       case 'disableGreetingMessage':
         return null; // Not modifiable by the user anyway.
       case 'inspectCompact':
@@ -610,6 +604,7 @@ export class CliUserConfigValidator extends SnippetShellUserConfigValidator {
         }
         return null;
       case 'updateURL':
+      case 'telemetryEndpoint':
         if (typeof value !== 'string' || (value.trim() && !isValidUrl(value))) {
           return `${key} must be a valid URL or empty`;
         }

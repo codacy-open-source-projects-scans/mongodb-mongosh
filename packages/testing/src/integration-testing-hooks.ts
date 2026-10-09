@@ -6,7 +6,10 @@ import path from 'path';
 import semver from 'semver';
 import { promisify } from 'util';
 import which from 'which';
-import { MongoCluster, type MongoClusterOptions } from 'mongodb-runner';
+import {
+  MongoCluster,
+  type MongoClusterOptions,
+} from '@mongodb-js/mongodb-runner';
 import { ConnectionString } from 'mongodb-connection-string-url';
 import { downloadCryptLibrary } from '@mongosh/build';
 
@@ -158,6 +161,7 @@ export class MongoRunnerSetup extends MongodSetup {
     if (this._cluster) return;
     const tmpDir = await getTmpdir();
     const version = process.env.MONGOSH_SERVER_TEST_VERSION;
+    const versionListUrl = process.env.MONGOSH_SERVER_TEST_VERSION_LIST_URL;
     const dirPath = MongoRunnerSetup._buildDirPath(
       this._id,
       version,
@@ -170,6 +174,7 @@ export class MongoRunnerSetup extends MongodSetup {
       logDir: path.join(tmpDir, 'mongodb-runner', 'logs', dirPath),
       downloadDir: path.join(tmpDir, 'mongodb-runner'),
       version: version,
+      ...(versionListUrl ? { downloadOptions: { versionListUrl } } : {}),
       ...this._opts,
     });
 
@@ -193,6 +198,14 @@ async function getInstalledMongodVersion(): Promise<string> {
 export async function downloadCurrentCryptSharedLibrary(
   versionSpec?: string
 ): Promise<string> {
+  // Only the -latest alpha server gets the matching -latest crypt_shared;
+  // every other server keeps the pinned library from downloadCryptLibrary().
+  if (
+    versionSpec === undefined &&
+    process.env.MONGOSH_SERVER_TEST_VERSION?.startsWith('latest-alpha')
+  ) {
+    versionSpec = 'latest-alpha';
+  }
   if (process.platform === 'linux') {
     return (
       await downloadCryptLibrary(
@@ -337,6 +350,37 @@ export function skipIfServerVersion(
 export function skipIfCommunityServer(server: MongodSetup): void {
   before(async function () {
     if (await server.isCommunityServer()) {
+      this.skip();
+    }
+  });
+}
+
+/**
+ * Whether the current process is running on a Node.js nightly build.
+ *
+ * mongosh currently does not terminate correctly on nightly builds
+ * (exit/quit/SIGINT, see MONGOSH-3498), which breaks tests that depend on
+ * shell lifecycle. Use this for inline `it`-body skips or static
+ * `(isNightly ? describe.skip : describe)(...)` skips of suites whose `after`
+ * hooks would otherwise hang (a `before`-hook skip does not skip `after` hooks).
+ */
+export const isNightly = process.version.includes('-nightly');
+
+/**
+ * Skip tests in the suite if running on a Node.js nightly build (MONGOSH-3498).
+ *
+ * NOTE: like the other skip* hooks this installs a `before` hook, so it does
+ * not skip `after`/`afterEach` hooks. For a suite whose `after` hook itself
+ * hangs on nightly, skip the whole suite statically with
+ * `(isNightly ? describe.skip : describe)(...)` instead.
+ *
+ * describe('...', () => {
+ *   skipOnNightly();
+ * });
+ */
+export function skipOnNightly(): void {
+  before(function () {
+    if (isNightly) {
       this.skip();
     }
   });

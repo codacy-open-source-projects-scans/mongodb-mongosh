@@ -122,15 +122,18 @@ const config: KnipConfig = {
       entry: ["src/index.tsx!", "config/*.js"],
       project: ["src/**/*.{ts,tsx}!"],
       ignoreDependencies: [
-        "@wojtekmaj/enzyme-adapter-react-17",
-        "enzyme",
         // Karma test runner plugins
         "karma-chrome-launcher",
         "karma-mocha",
         "karma-mocha-reporter",
         "karma-typescript",
-        // Resolved as `<depname>/`
+        // Resolved as `<depname>/` in config/webpack.config.base.js
+        "assert",
         "buffer",
+        "events",
+        "process",
+        "punycode",
+        "string_decoder",
         "util",
       ],
     },
@@ -143,6 +146,9 @@ const config: KnipConfig = {
         "tr46",
         "assert",
         "buffer",
+        "events",
+        "punycode",
+        "string_decoder",
         "util",
         // Needed to run tests
         "@mongosh/cli-repl",
@@ -162,7 +168,6 @@ const config: KnipConfig = {
       entry: [
         "src/index.ts!",
         "bin/*.js!",
-        "test/fixtures/**/*",
         "scripts/*.js",
         "benchmark/index.ts",
       ],
@@ -170,6 +175,13 @@ const config: KnipConfig = {
         // Used by make-runtime-support.js
         "src/runtime-support.nocov.js",
       ],
+    },
+
+    "packages/async-rewriter-spec": {
+      entry: [
+        "src/index.ts",
+        "test/fixtures/**/*",
+      ]
     },
 
     "packages/snippet-manager": {

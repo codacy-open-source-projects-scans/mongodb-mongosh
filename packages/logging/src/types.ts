@@ -17,13 +17,30 @@ export type MongoshLoggingAndTelemetryArguments = {
     [key: string]: unknown;
   };
   mongoshVersion: string;
-  /** Machine-specific ID; gets set automatically when omitted */
-  deviceId?: string | undefined;
+  /** Machine-specific ID */
+  deviceId: Promise<string> | string;
+  /**
+   * The resolved telemetry endpoint. When empty, telemetry is not being sent
+   * anywhere, so full event payloads are logged locally for debugging.
+   */
+  telemetryEndpoint?: string;
 };
 
-export type MongoshTrackingProperties = {
-  mongosh_version: string;
-  session_id: string;
+export type SessionTelemetryState = {
+  isInteractive: boolean;
+  timings: Record<string, number>;
+  errorCount: number;
+  mongoshrcLoaded: boolean;
+  mongorcWarning: boolean;
+  snippetLoadedCount: number;
+  shellFlag: boolean;
+  cliEvalCount: number;
+  cliFileCount: number;
+  evaluationCount: number;
+  commandsRepl: Record<string, number>;
+  commandsRc: Record<string, number>;
+  sequence: string[];
+  sequenceTruncated: boolean;
 };
 
 export type LoggingAndTelemetryBusEventState = {
@@ -34,6 +51,5 @@ export type LoggingAndTelemetryBusEventState = {
     deprecatedApiCalls: MultiSet<Pick<ApiEvent, 'class' | 'method'>>;
   };
   usesShellOption: boolean;
-  telemetryAnonymousId: string | undefined;
-  userId: string | undefined;
+  session: SessionTelemetryState;
 };

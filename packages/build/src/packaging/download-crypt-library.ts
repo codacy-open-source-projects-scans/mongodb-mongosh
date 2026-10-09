@@ -8,7 +8,7 @@ import { getDistro, getArch } from '../config';
 
 export async function downloadCryptLibrary(
   variant: PackageVariant | 'host',
-  versionSpec = ''
+  versionSpec = 'continuous'
 ): Promise<{ cryptLibrary: string; version: string }> {
   let opts: DownloadOptions = {};
   opts.arch = variant === 'host' ? undefined : getArch(variant);
@@ -33,18 +33,6 @@ export async function downloadCryptLibrary(
     'crypt-store',
     variant
   );
-
-  if (!versionSpec) {
-    // Download mongodb for latest server version, including rapid releases
-    // (for the platforms that they exist for, i.e. for ppc64le/s390x only pick stable releases).
-    versionSpec = '8.0.12'; // TODO(MONGOSH-2192): Switch back to 'continuous' and deal with affected platform support.
-
-    if (/ppc64|s390x/.test(opts.arch || process.arch)) {
-      versionSpec = '8.0.12';
-    } else if ((opts.platform || process.platform) === 'darwin') {
-      versionSpec = '8.0.5'; // TBD(MONGOSH-2192,SERVER-101020): Figure out at what point we use a later version.
-    }
-  }
 
   const { downloadedBinDir: libdir, version } =
     await downloadMongoDbWithVersionInfo({

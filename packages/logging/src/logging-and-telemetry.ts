@@ -40,23 +40,22 @@ import type {
 import { inspect } from 'util';
 import { MongoLogWriter } from 'mongodb-log-writer';
 import { mongoLogId } from 'mongodb-log-writer';
-import type {
-  AnalyticsIdentifyMessage,
-  AnalyticsTrackMessage,
-  MongoshAnalytics,
-  MongoshAnalyticsIdentity,
-} from './analytics-helpers';
+import type { MongoshAnalytics } from './analytics-helpers';
+import type { TelemetryEvent } from './telemetry-events';
+type TrackableEvent = {
+  name: string;
+  payload?: Record<string, unknown> | (() => Record<string, unknown>);
+};
 import type { ConnectEventMap } from '@mongodb-js/devtools-connect';
 import { hookLogger } from '@mongodb-js/devtools-connect';
-import { MultiSet, toSnakeCase } from './helpers';
+import { MultiSet, toSnakeCase, getAiAgent } from './helpers';
 import { Writable } from 'stream';
 import type {
   LoggingAndTelemetryBusEventState,
   MongoshLoggingAndTelemetry,
   MongoshLoggingAndTelemetryArguments,
-  MongoshTrackingProperties,
+  SessionTelemetryState,
 } from './types';
-import { getDeviceId } from '@mongodb-js/device-id';
 
 export function setupLoggingAndTelemetry(
   props: MongoshLoggingAndTelemetryArguments
@@ -86,6 +85,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
     [key: string]: unknown;
   };
   private readonly mongoshVersion: string;
+  private readonly telemetryEndpoint: string;
 
   private log: MongoLogWriter;
   private pendingBusEvents: CallableFunction[] = [];
@@ -93,8 +93,9 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
   private isSetup = false;
   private isBufferingBusEvents = false;
   private isBufferingTelemetryEvents = false;
+  private trackFn: ((event: TrackableEvent) => void) | undefined;
 
-  private deviceId: string | undefined;
+  private deviceId: string | Promise<string>;
 
   /** @internal Used for awaiting the telemetry setup in tests. */
   public setupTelemetryPromise: Promise<void> = Promise.resolve();
@@ -107,6 +108,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
     userTraits,
     mongoshVersion,
     deviceId,
+    telemetryEndpoint,
   }: MongoshLoggingAndTelemetryArguments) {
     this.bus = bus;
     this.analytics = analytics;
@@ -114,6 +116,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
     this.userTraits = userTraits;
     this.mongoshVersion = mongoshVersion;
     this.deviceId = deviceId;
+    this.telemetryEndpoint = telemetryEndpoint ?? '';
   }
 
   public setup(): void {
@@ -130,6 +133,38 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
   }
 
   public async flush(): Promise<void> {
+    const session: SessionTelemetryState = this.busEventState.session;
+    if (this.trackFn) {
+      // Emit the "Session Ended" event once per session. Whether the session is
+      // one we collect telemetry for at all is decided by the analytics
+      // instance passed in, see CliRepl#isTelemetryEnabled().
+      this.trackFn({
+        name: 'Session Ended',
+        payload: {
+          is_interactive: session.isInteractive,
+          commands_repl:
+            Object.keys(session.commandsRepl).length > 0
+              ? session.commandsRepl
+              : undefined,
+          commands_rc:
+            Object.keys(session.commandsRc).length > 0
+              ? session.commandsRc
+              : undefined,
+          sequence: session.sequence,
+          sequence_truncated: session.sequenceTruncated,
+          error_count: session.errorCount,
+          ...session.timings,
+          mongoshrc_loaded: session.mongoshrcLoaded,
+          mongorc_warning: session.mongorcWarning,
+          snippet_loaded_count: session.snippetLoadedCount,
+          shell_flag: session.shellFlag,
+          cli_eval_count: session.cliEvalCount,
+          cli_file_count: session.cliFileCount,
+          evaluation_count: session.evaluationCount,
+        },
+      });
+    }
+
     // Run any other pending events with the set or dummy log for telemetry purposes.
     this.runAndClearPendingBusEvents();
 
@@ -141,26 +176,13 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
   }
 
   private async setupTelemetry(): Promise<void> {
-    if (!this.deviceId) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const getMachineId = require('native-machine-id').getMachineId;
-        this.deviceId = await getDeviceId({
-          getMachineId: () => getMachineId({ raw: true }),
-          onError: (reason, error) => {
-            if (reason === 'abort') {
-              return;
-            }
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-            this.bus.emit('mongosh:error', error, 'telemetry');
-          },
-          abortSignal: this.telemetrySetupAbort.signal,
-        });
-      } catch (error) {
-        this.deviceId = 'unknown';
-        this.bus.emit('mongosh:error', error as Error, 'telemetry');
-      }
-    }
+    this.deviceId = await this.deviceId;
+
+    // Emit the "Identify" event once per session.
+    this.trackFn?.({
+      name: 'Identify',
+      payload: () => ({ ...this.userTraits }),
+    });
 
     this.runAndClearPendingTelemetryEvents();
   }
@@ -217,11 +239,26 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       deprecatedApiCalls: new MultiSet<Pick<ApiEvent, 'class' | 'method'>>(),
     },
     usesShellOption: false,
-    telemetryAnonymousId: undefined,
-    userId: undefined,
+    session: {
+      isInteractive: false,
+      timings: {},
+      errorCount: 0,
+      mongoshrcLoaded: false,
+      mongorcWarning: false,
+      snippetLoadedCount: 0,
+      shellFlag: false,
+      cliEvalCount: 0,
+      cliFileCount: 0,
+      evaluationCount: 0,
+      commandsRepl: {},
+      commandsRc: {},
+      sequence: [],
+      sequenceTruncated: false,
+    },
   };
 
   private setupBusEventListeners(): void {
+    const MAX_SEQUENCE_LENGTH = 100;
     const onBus = <
       EventsMap extends Record<
         keyof MongoshBusEventsMap | keyof ConnectEventMap,
@@ -245,58 +282,45 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       return this.bus;
     };
 
-    const getUserTraits = (): AnalyticsIdentifyMessage['traits'] => ({
-      ...this.userTraits,
-      device_id: this.deviceId ?? 'unknown',
-      session_id: this.log.logId,
-    });
-
-    const getTrackingProperties = (): MongoshTrackingProperties => ({
+    const getTrackingProperties = () => ({
       mongosh_version: this.mongoshVersion,
+      ai_agent: getAiAgent(),
       session_id: this.log.logId,
     });
 
-    const getTelemetryUserIdentity = (): MongoshAnalyticsIdentity => {
-      return {
-        anonymousId:
-          this.busEventState.telemetryAnonymousId ??
-          (this.busEventState.userId as string),
-      };
-    };
-
-    const track = (
-      message: Pick<AnalyticsTrackMessage, 'event' | 'timestamp'> & {
-        properties?: Omit<
-          AnalyticsTrackMessage['properties'],
-          keyof MongoshTrackingProperties
-        >;
-      }
-    ): void => {
-      const callback = () =>
-        this.analytics.track({
-          ...getTelemetryUserIdentity(),
-          ...message,
-          properties: {
+    const track = (event: TrackableEvent): void => {
+      const callback = () => {
+        const rawPayload =
+          typeof event.payload === 'function' ? event.payload() : event.payload;
+        const telemetryEvent = {
+          name: event.name,
+          payload: {
             ...getTrackingProperties(),
-            ...message.properties,
+            ...rawPayload,
           },
-        });
+        } as unknown as TelemetryEvent;
+        this.log.info(
+          'MONGOSH',
+          mongoLogId(1_000_000_016),
+          'analytics',
+          'Sending telemetry event',
+          // When no telemetry endpoint is configured, events are not sent
+          // anywhere, so log the full payload locally to aid debugging.
+          // With a real endpoint, log only the event name.
+          this.telemetryEndpoint
+            ? { name: telemetryEvent.name }
+            : { name: telemetryEvent.name, payload: telemetryEvent.payload }
+        );
+        this.analytics.track(telemetryEvent);
+      };
 
-      if (this.isBufferingTelemetryEvents) {
-        this.pendingTelemetryEvents.push(callback);
-      } else {
-        callback();
-      }
-    };
-
-    const identify = (): void => {
-      const callback = () =>
-        this.analytics.identify({
-          ...getTelemetryUserIdentity(),
-          traits: getUserTraits(),
-        });
-
-      if (this.isBufferingTelemetryEvents) {
+      // Bus events (and thus the real log writer via attachLogger()) may not
+      // be ready yet; queuing here too ensures the Identify event emitted
+      // eagerly from setupTelemetry() below isn't logged against the
+      // dummyLogger and silently dropped from the log file.
+      if (this.isBufferingBusEvents) {
+        this.pendingBusEvents.push(callback);
+      } else if (this.isBufferingTelemetryEvents) {
         this.pendingTelemetryEvents.push(callback);
       } else {
         callback();
@@ -331,7 +355,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       const { uri, resolved_hostname, ...argsWithoutUriAndHostname } = args;
       const connectionUri = uri && redactConnectionString(uri);
       const atlasHostname = {
-        atlas_hostname: args.is_atlas ? resolved_hostname : null,
+        atlas_hostname: args.is_atlas ? resolved_hostname ?? null : null,
       };
       const properties = {
         ...argsWithoutUriAndHostname,
@@ -344,72 +368,26 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'connect',
         'Connecting to server',
         {
-          userId: this.busEventState.userId,
-          telemetryAnonymousId: this.busEventState.telemetryAnonymousId,
           connectionUri,
           ...properties,
         }
       );
 
+      // Emit the "New Connection" event once per connection.
       track({
-        event: 'New Connection',
-        properties,
+        name: 'New Connection',
+        payload: properties,
       });
     });
 
     onBus('mongosh:start-session', (args: SessionStartedEvent) => {
-      const normalizedTimingsArray = Object.entries(args.timings).map(
-        ([key, duration]) => {
-          const snakeCaseKey = toSnakeCase(key);
-          return [snakeCaseKey, duration];
-        }
-      );
-
-      const normalizedTimings = Object.fromEntries(normalizedTimingsArray);
-      track({
-        event: 'Startup Time',
-        properties: {
-          is_interactive: args.isInteractive,
-          js_context: args.jsContext,
-          ...normalizedTimings,
-        },
-      });
+      const session = this.busEventState.session;
+      session.isInteractive = args.isInteractive;
+      session.shellFlag = this.busEventState.usesShellOption;
+      for (const [key, duration] of Object.entries(args.timings)) {
+        session.timings[toSnakeCase(key) + '_ms'] = duration;
+      }
     });
-
-    onBus(
-      'mongosh:new-user',
-      (newTelemetryUserIdentity: { userId: string; anonymousId: string }) => {
-        if (!newTelemetryUserIdentity.anonymousId) {
-          this.busEventState.userId = newTelemetryUserIdentity.userId;
-        }
-        this.busEventState.telemetryAnonymousId =
-          newTelemetryUserIdentity.anonymousId;
-
-        identify();
-      }
-    );
-
-    onBus(
-      'mongosh:update-user',
-      (updatedTelemetryUserIdentity: {
-        userId: string;
-        anonymousId?: string;
-      }) => {
-        if (updatedTelemetryUserIdentity.anonymousId) {
-          this.busEventState.telemetryAnonymousId =
-            updatedTelemetryUserIdentity.anonymousId;
-        } else {
-          this.busEventState.userId = updatedTelemetryUserIdentity.userId;
-        }
-        identify();
-        this.log.info(
-          'MONGOSH',
-          mongoLogId(1_000_000_005),
-          'config',
-          'User updated'
-        );
-      }
-    );
 
     onBus('mongosh:error', (error: Error, context: string) => {
       const mongoshError = error as {
@@ -429,15 +407,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       );
 
       if (error.name.includes('Mongosh')) {
-        track({
-          event: 'Error',
-          properties: {
-            name: mongoshError.name,
-            code: mongoshError.code,
-            scope: mongoshError.scope,
-            metadata: mongoshError.metadata,
-          },
-        });
+        this.busEventState.session.errorCount++;
       }
     });
 
@@ -491,10 +461,17 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'Used "use" command',
         args
       );
-
-      track({
-        event: 'Use',
-      });
+      const { session, hasStartedMongoshRepl } = this.busEventState;
+      const commands = hasStartedMongoshRepl
+        ? session.commandsRepl
+        : session.commandsRc;
+      const key = 'ShellApi.use';
+      commands[key] = ((commands[key] as number | undefined) ?? 0) + 1;
+      if (session.sequence.length < MAX_SEQUENCE_LENGTH) {
+        session.sequence.push(key);
+      } else {
+        session.sequenceTruncated = true;
+      }
     });
 
     onBus('mongosh:show', (args: ShowEvent) => {
@@ -505,13 +482,6 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'Used "show" command',
         args
       );
-
-      track({
-        event: 'Show',
-        properties: {
-          method: args.method,
-        },
-      });
     });
 
     onBus('mongosh:setCtx', (args: ApiEventWithArguments) => {
@@ -525,7 +495,8 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
     });
 
     onBus('mongosh:api-call-with-arguments', (args: ApiEventWithArguments) => {
-      // TODO: redactInfo cannot handle circular or otherwise nontrivial input
+      // redact() overflows the stack on circular input and leaves anything that
+      // is not a plain object, array or string unredacted.
       let arg;
       try {
         arg = JSON.parse(JSON.stringify(args));
@@ -550,17 +521,9 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         args
       );
 
-      track({
-        event: this.busEventState.hasStartedMongoshRepl
-          ? 'Script Loaded'
-          : 'Script Loaded CLI',
-        properties: {
-          nested: args.nested,
-          ...(this.busEventState.hasStartedMongoshRepl
-            ? {}
-            : { shell: this.busEventState.usesShellOption }),
-        },
-      });
+      if (!this.busEventState.hasStartedMongoshRepl) {
+        this.busEventState.session.cliFileCount++;
+      }
     });
 
     onBus('mongosh:eval-cli-script', () => {
@@ -571,12 +534,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'Evaluating script passed on the command line'
       );
 
-      track({
-        event: 'Script Evaluated',
-        properties: {
-          shell: this.busEventState.usesShellOption,
-        },
-      });
+      this.busEventState.session.cliEvalCount++;
     });
 
     onBus('mongosh:mongoshrc-load', () => {
@@ -587,9 +545,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'Loading .mongoshrc.js'
       );
 
-      track({
-        event: 'Mongoshrc Loaded',
-      });
+      this.busEventState.session.mongoshrcLoaded = true;
     });
 
     onBus('mongosh:mongoshrc-mongorc-warn', () => {
@@ -600,9 +556,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
         'Warning about .mongorc.js/.mongoshrc.js mismatch'
       );
 
-      track({
-        event: 'Mongorc Warning',
-      });
+      this.busEventState.session.mongorcWarning = true;
     });
 
     onBus('mongosh:crypt-library-load-skip', (ev: CryptLibrarySkipEvent) => {
@@ -766,9 +720,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       );
 
       if (ev.args[0] === 'install') {
-        track({
-          event: 'Snippet Install',
-        });
+        this.busEventState.session.snippetLoadedCount++;
       }
     });
 
@@ -819,23 +771,21 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
           'Deprecated API call',
           entry
         );
-
-        track({
-          event: 'Deprecated Method',
-          properties: {
-            ...entry,
-          },
-        });
       }
+      const { session, hasStartedMongoshRepl } = this.busEventState;
+      const commands = hasStartedMongoshRepl
+        ? session.commandsRepl
+        : session.commandsRc;
       for (const [entry, count] of apiCalls) {
-        track({
-          event: 'API Call',
-          properties: {
-            ...entry,
-            count,
-          },
-        });
+        const key = `${entry.class}.${entry.method}`;
+        commands[key] = ((commands[key] as number | undefined) ?? 0) + count;
+        if (session.sequence.length < MAX_SEQUENCE_LENGTH) {
+          session.sequence.push(key);
+        } else {
+          session.sequenceTruncated = true;
+        }
       }
+      session.evaluationCount++;
       deprecatedApiCalls.clear();
       apiCalls.clear();
       this.busEventState.apiCallTracking.isEnabled = false;
@@ -948,5 +898,7 @@ export class LoggingAndTelemetry implements MongoshLoggingAndTelemetry {
       'mongosh',
       (uri) => redactConnectionString(uri)
     );
+
+    this.trackFn = track;
   }
 }

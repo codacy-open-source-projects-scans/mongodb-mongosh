@@ -856,11 +856,21 @@ export default class Shard<
 
   @apiVersions([])
   @returnsPromise
-  async listShards(): Promise<ShardInfo[]> {
-    this._emitShardApiCall('listShards', {});
+  async listShards(filter?: Document): Promise<ShardInfo[]> {
+    assertArgsDefinedType(
+      [filter],
+      [[undefined, 'object']],
+      'Shard.listShards'
+    );
+    this._emitShardApiCall('listShards', { filter });
     await getConfigDB(this._database);
 
-    return (await this._database.adminCommand({ listShards: 1 })).shards ?? [];
+    const command: Document = { listShards: 1 };
+    if (filter) {
+      command.filter = filter;
+    }
+
+    return (await this._database.adminCommand(command)).shards ?? [];
   }
 
   @serverVersions(['8.0.0', ServerVersions.latest])
@@ -882,5 +892,34 @@ export default class Shard<
       host: configShard.host,
       ...(configShard.tags && { tags: configShard.tags }),
     };
+  }
+
+  @serverVersions(['8.2.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async shardDrainingStatus(shardId?: string): Promise<Document> {
+    assertArgsDefinedType(
+      [shardId],
+      [[undefined, 'string']],
+      'Shard.shardDrainingStatus'
+    );
+    this._emitShardApiCall('shardDrainingStatus', { shardId });
+    await getConfigDB(this._database);
+
+    return this._database._runAdminReadCommand({
+      shardDrainingStatus: shardId ?? 1,
+    });
+  }
+
+  @serverVersions(['8.3.0', ServerVersions.latest])
+  @apiVersions([])
+  @returnsPromise
+  async getTransitionToDedicatedConfigServerStatus(): Promise<Document> {
+    this._emitShardApiCall('getTransitionToDedicatedConfigServerStatus', {});
+    await getConfigDB(this._database);
+
+    return this._database._runAdminReadCommand({
+      getTransitionToDedicatedConfigServerStatus: 1,
+    });
   }
 }

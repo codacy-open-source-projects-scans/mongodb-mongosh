@@ -17,13 +17,20 @@ for (const {
 } of NODE_VERSIONS) {
   for (const platform of PLATFORMS) {
     const platformDetails = platformToDetails[platform];
-    UNIT_TESTS_BUILD_VARIANTS.push({
+    const ubuntu2204Details = {
       ...platformDetails,
+      runOn: 'ubuntu2204-small',
+      displayName: 'Ubuntu 22.04 x64',
+    };
+    const unitTestsOnlyDetails =
+      platform === 'linux' ? ubuntu2204Details : platformDetails;
+    UNIT_TESTS_BUILD_VARIANTS.push({
+      ...unitTestsOnlyDetails,
       name: `${platform}-n${nShort}`,
-      displayName: `${platformDetails.displayName} n${nShort} (Unit tests)`,
+      displayName: `${unitTestsOnlyDetails.displayName} n${nShort} (Unit tests)`,
       id: `${platform}-n${nShort}`,
       runWithUnitTestsOnly: true,
-      tags: platformDetails.tags ?? [],
+      tags: unitTestsOnlyDetails.tags ?? [],
       platform,
       nShort,
       nVersion,
@@ -33,31 +40,30 @@ for (const {
     for (const {
       shortName: mShort,
       versionSpec: mVersion,
+      versionListUrl: mVersionListUrl,
     } of MONGODB_VERSIONS) {
       if (
-        mShort === '42xe' &&
-        (platform === 'linux' || platform === 'darwin')
-      ) {
-        // The MongoDB 4.2 enterprise server does not work on Ubuntu 20.04 or arm64 macOS
-        continue;
-      }
-      if (
-        ['42xc', '42xe', '44xc', '44xe', '50xc', '50xe'].includes(mShort) &&
+        ['44xc', '44xe', '50xc', '50xe'].includes(mShort) &&
         platform === 'darwin'
       ) {
         // Unit tests on macOS use arm64 and therefore require 6.0+
         continue;
       }
+      const details =
+        platform === 'linux' &&
+        ['latest', '90xc', '90xe'].includes(mShort)
+          ? ubuntu2204Details
+          : platformDetails;
       UNIT_TESTS_BUILD_VARIANTS.push({
-        ...platformDetails,
+        ...details,
         name: `tests_${platform}-m${mShort}_n${nShort}`,
         id: `${platform}-m${mShort}_n${nShort}`,
         runWithUnitTestsOnly: false,
         tags: [
-          ...(platformDetails.tags ?? []),
+          ...(details.tags ?? []),
           ...(mShort === 'latest' ? ['mlatest'] : []),
         ],
-        displayName: `${platformDetails.displayName}${
+        displayName: `${details.displayName}${
           mShort === undefined ? '' : ` m${mShort}`
         } n${nShort} (Unit tests)`,
         platform,
@@ -65,6 +71,7 @@ for (const {
         nVersion,
         mShort,
         mVersion,
+        mVersionListUrl,
         skipNodeVersionCheck,
         disable: optional === true,
       });

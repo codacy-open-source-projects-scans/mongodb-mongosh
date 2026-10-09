@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import {
   css,
   ThemeProvider,
-  Theme,
+  Themes,
   Description,
   FormFieldContainer,
   Label,
@@ -17,6 +17,7 @@ import { IframeRuntime } from './iframe-runtime';
 import { Shell } from './index';
 import type { ShellOutputEntry } from './components/shell-output-line';
 import type { ConnectionInfo } from '@mongosh/service-provider-core';
+import * as bson from 'bson';
 
 injectGlobal({
   body: {
@@ -89,6 +90,8 @@ const delay = (msecs = 0): Promise<void> =>
   });
 
 class DemoServiceProvider {
+  bsonLibrary = bson;
+
   async buildInfo(): Promise<object> {
     await delay();
     return {
@@ -190,7 +193,10 @@ const IframeRuntimeExample: React.FunctionComponent = () => {
     <div className={sandboxContainer}>
       <div className={shellContainer}>
         <ThemeProvider
-          theme={{ theme: darkMode ? Theme.Dark : Theme.Light, enabled: true }}
+          theme={{
+            theme: darkMode ? Themes.Dark : Themes.Light,
+            enabled: true,
+          }}
         >
           <Shell
             runtime={runtime}

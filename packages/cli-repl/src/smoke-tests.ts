@@ -8,6 +8,7 @@ import escapeRegexp from 'escape-string-regexp';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import { getStoragePaths } from './config-directory';
 
 export interface SelfTestOptions {
   smokeTestServer: string | undefined;
@@ -276,6 +277,20 @@ export async function runSmokeTests({
             tags: ['startup'],
           },
           {
+            name: 'db_hello_script_plainvm',
+            input: 'print(EJSON.stringify(db.hello(), null, 2))',
+            output: /"ok": ?1\b/,
+            includeStderr: false,
+            exitCode: 0,
+            testArgs: [
+              smokeTestServer,
+              '--file=$INPUT_AS_FILE',
+              '--jsContext=plain-vm',
+            ],
+            perfTestIterations: 20,
+            tags: ['startup', 'script'],
+          },
+          {
             name: 'db_cursor_iteration_repl',
             input: `let count = 0; for (const item of ${manyDocsCursor(
               12345
@@ -360,6 +375,7 @@ export async function runSmokeTests({
         if (!perfTestIterations) continue;
         const durations: number[] = [];
         for (let i = 0; i < perfTestIterations; i++) {
+          await resetTelemetryThrottleState();
           const { durationSeconds } = await runSmokeTest(smokeTestArgs);
           durations.push(durationSeconds);
         }
@@ -400,6 +416,37 @@ export async function runSmokeTests({
   } else {
     console.log('all tests passed');
   }
+}
+
+/**
+ * Reset the on-disk telemetry throttle state (am-<device_id>.json — with
+ * session_id as a defensive fallback key — in the shell's local data
+ * directory, see ThrottledAnalytics). The perf harness
+ * spawns many short-lived mongosh processes back to back; the cross-process
+ * 30-events/min throttle would otherwise mute telemetry for most iterations —
+ * a harness artifact that no real session shape produces. Removing the state
+ * between spawns makes each iteration behave like an independent,
+ * unthrottled session (device id, config and logs are left untouched).
+ */
+async function resetTelemetryThrottleState(): Promise<void> {
+  const dir = getStoragePaths().shellLocalDataPath;
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return; // the directory may not exist yet — nothing to reset
+  }
+  await Promise.all(
+    entries
+      .filter((name) => /^am-.*\.json$/.test(name))
+      .map(async (name) => {
+        try {
+          await fs.unlink(path.join(dir, name));
+        } catch {
+          // best-effort: a failed cleanup must not fail the perf run
+        }
+      })
+  );
 }
 
 /**
